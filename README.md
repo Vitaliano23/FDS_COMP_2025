@@ -1,6 +1,6 @@
 # FDS_COMP_2025 — Kaggle Competition (Pokémon Battle Prediction 2025)
 
-This repository contains three independent models designed to generate submissions for the Kaggle competition **“FDS — Pokémon Battles Prediction 2025.”**  
+This repository contains three independent models designed to generate submissions for the Kaggle competition **“FDS — Pokémon Battles Prediction 2025.”**, developed as part of the *Fundamentals of Data Science* course.  
 Each model is provided as a separate Python script.
 
 ## Repository Contents
@@ -22,6 +22,14 @@ A model with a structured feature engineering pipeline, feature selection via co
 
 ### Model 3 — “mrk-notebook-fds.py”
 A model with a targeted feature engineering pipeline, feature selection via VIF pruning and Elastic Net, and a multi-model stacking ensemble with multi-seed validation and optimized decision thresholding.
+
+## Authors
+
+| Name | Student ID | Email |
+|------|------------|-------|
+| **Vitaliano Barberio** | *insert ID* | *insert email* |
+| **Debora Siri** | 1921846 | *insert email* |
+| **Mirko Impera** | *insert ID* | *insert email* |
 
 
 
