@@ -28,7 +28,7 @@ A model with a targeted feature engineering pipeline, feature selection via VIF 
 | Name | Student ID | Email |
 |------|------------|-------|
 | **Vitaliano Barberio** | *insert ID* | *insert email* |
-| **Debora Siri** | 1921846 | *insert email* |
+| **Debora Siri** | 1921846 | *siri.1921846@studenti.uniroma1.it* |
 | **Mirko Impera** | *insert ID* | *insert email* |
 
 
