@@ -1001,6 +1001,159 @@ def new_features_deb(r):
     # return f
     raise NotImplementedError("Paste here your full new_features_deb implementation.")
 
+from typing import List, Dict, Any
+
+def _one_record_features(record: Dict[str, Any]) -> Dict[str, float]:
+    """
+    Extracts all per-battle features for a single battle record.
+    Uses the helper blocks defined above (timeline, STAB, Mirko, Deb, damage, etc.).
+    """
+    row: Dict[str, float] = {}
+
+    # --- IDs / target ---
+    row["battle_id"] = record.get("battle_id")
+    if "player_won" in record:
+        try:
+            row["player_won"] = int(record.get("player_won", 0))
+        except Exception:
+            row["player_won"] = 0
+
+    # --- Timeline & HP series ---
+    tl = get_timeline(record, max_turns=30)
+    p1_hp, p2_hp = _extract_hp_series(tl)
+
+    # Basic HP summary for both sides
+    m1, last1, std1, min1 = _mean_last_std_min(p1_hp)
+    m2, last2, std2, min2 = _mean_last_std_min(p2_hp)
+    row.update({
+        "tl_hp_mean_p1": m1,
+        "tl_hp_mean_p2": m2,
+        "tl_hp_diff_mean": m1 - m2,
+        "tl_hp_last_p1": last1,
+        "tl_hp_last_p2": last2,
+        "tl_hp_last_diff": last1 - last2,
+        "tl_hp_std_p1": std1,
+        "tl_hp_std_p2": std2,
+        "tl_hp_min_p1": min1,
+        "tl_hp_min_p2": min2,
+        "tl_auc_hp_p1": _auc_pct(p1_hp),
+        "tl_auc_hp_p2": _auc_pct(p2_hp),
+        "tl_auc_hp_diff": _auc_pct(p1_hp) - _auc_pct(p2_hp),
+    })
+
+    # Fraction of turns where P1 is ahead in HP
+    if p1_hp and p2_hp and len(p1_hp) == len(p2_hp):
+        diff_seq = [a - b for a, b in zip(p1_hp, p2_hp)]
+        row["tl_frac_turns_advantage"] = _frac_positive(diff_seq)
+        row["tl_slope_hp_diff"] = _slope(diff_seq)
+    else:
+        row["tl_frac_turns_advantage"] = 0.0
+        row["tl_slope_hp_diff"] = 0.0
+
+    # Status counts & KO counts
+    row["tl_status_p1_count"] = _status_count(tl, "p1")
+    row["tl_status_p2_count"] = _status_count(tl, "p2")
+    row["tl_ko_p1_count"] = _ko_count(p1_hp)
+    row["tl_ko_p2_count"] = _ko_count(p2_hp)
+
+    # --- Move stats (full + first 5 turns) ---
+    row.update(_move_stats_for_side(tl, "p1", window=None))
+    row.update(_move_stats_for_side(tl, "p2", window=None))
+    row.update(_move_stats_for_side(tl, "p1", window=5))
+    row.update(_move_stats_for_side(tl, "p2", window=5))
+
+    # --- STAB features ---
+    try:
+        row.update(_stab_features(record))
+    except Exception:
+        # Fail-safe: do not break if something goes wrong inside STAB logic
+        pass
+
+    # --- Early momentum features (first 3 turns) ---
+    try:
+        row.update(_early_momentum_features(record, first_n=3))
+    except Exception:
+        pass
+
+    # --- Priority features (full + first 5 turns) ---
+    try:
+        row.update(_priority_feature_block(record))
+    except Exception:
+        pass
+
+    # --- Hazard flags, momentum shift, recovery pressure ---
+    try:
+        row.update(_hazard_flags(tl))
+    except Exception:
+        pass
+    try:
+        row.update(_momentum_shift(tl, t1=3, t2=10))
+    except Exception:
+        pass
+    try:
+        row.update(_recovery_pressure(tl))
+    except Exception:
+        pass
+
+    # --- Lead matchup (damage index) ---
+    try:
+        row.update(_p1_vs_p2lead_matchup_index(record, tl))
+    except Exception:
+        pass
+
+    # --- Simple “new_features” (HP + team summary) ---
+    try:
+        row.update(new_features(record))
+    except Exception:
+        pass
+
+    # --- Mirko block ---
+    try:
+        row.update(new_features_mirko(record))
+    except Exception:
+        pass
+
+    # --- Deb block ---
+    try:
+        row.update(new_features_deb(record))
+    except Exception:
+        pass
+
+    # --- Damage-based features from global avg damage stats ---
+    try:
+        # POKEMON_AVG_DAMAGE is filled in run_feature_engineering_mrk()
+        row.update(damage_feature_for_battle(record, pokemon_avg_damage))
+    except Exception:
+        pass
+
+    return row
+
+
+def create_simple_features(records: List[Dict[str, Any]]) -> pd.DataFrame:
+    """
+    Main feature-extraction loop:
+    - Iterates over a list of battle records
+    - Calls _one_record_features for each
+    - Returns a DataFrame with battle_id, player_won (if present), and all engineered features
+    """
+    rows = []
+    for r in records:
+        try:
+            rows.append(_one_record_features(r))
+        except Exception as e:
+            # Fail-safe: if a single record crashes, print and skip
+            print(f"[Model 3] Warning: failed to process battle_id={r.get('battle_id')} | {e}")
+    df = pd.DataFrame(rows)
+
+    # Optional: order columns as [battle_id, player_won, ...rest...]
+    cols = list(df.columns)
+    id_cols = [c for c in cols if c == "battle_id"]
+    target_cols = [c for c in cols if c == "player_won"]
+    other_cols = [c for c in cols if c not in id_cols + target_cols]
+    ordered_cols = id_cols + target_cols + other_cols
+    df = df[ordered_cols]
+
+    return df
 
 # ============================================================
 # PUBLIC FEATURE ENGINEERING ENTRYPOINT FOR MODEL 3
