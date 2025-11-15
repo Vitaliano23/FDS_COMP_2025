@@ -44,65 +44,6 @@ import xgboost as xgb
 # In[ ]:
 
 
-import json
-import pandas as pd
-import os
-
-# --- Define the path to our data ---
-COMPETITION_NAME = 'fds-pokemon-battles-prediction-2025'
-DATA_PATH = os.path.join('../input', COMPETITION_NAME)
-train_file_path = "/kaggle/input/fds-pokemon-battles-prediction-2025/train.jsonl"
-test_file_path = "/kaggle/input/fds-pokemon-battles-prediction-2025/train.jsonl"
-
-train_data = []
-test_data  = []
-
-# --- Load TRAIN data ---
-print(f"📦 Loading data from '{train_file_path}'...")
-try:
-    with open(train_file_path, 'r') as f:
-        for line in f:
-            train_data.append(json.loads(line))
-    print(f"✅ Successfully loaded {len(train_data)} battles from train.")
-    
-    # Show structure of first train battle
-    if train_data:
-        print("\n--- Structure of the first train battle: ---")
-        first_battle = train_data[0]
-        battle_for_display = first_battle.copy()
-        battle_for_display['battle_timeline'] = first_battle.get('battle_timeline', [])[:2]
-        print(json.dumps(battle_for_display, indent=4))
-        if len(first_battle.get('battle_timeline', [])) > 3:
-            print("    ...")
-            print("    (battle_timeline has been truncated for display)")
-
-except FileNotFoundError:
-    print(f"❌ ERROR: Could not find the training file at '{train_file_path}'.")
-    print("Please make sure you have added the competition data to this notebook.")
-
-
-# --- Load TEST data ---
-print(f"\n📦 Loading data from '{test_file_path}'...")
-try:
-    with open(test_file_path, 'r') as f:
-        for line in f:
-            test_data.append(json.loads(line))
-    print(f"✅ Successfully loaded {len(test_data)} battles from test.")
-    
-    if test_data:
-        print("\n--- Structure of the first test battle: ---")
-        first_test_battle = test_data[0]
-        test_display = first_test_battle.copy()
-        test_display['battle_timeline'] = test_display.get('battle_timeline', [])[:2]
-        print(json.dumps(test_display, indent=4))
-        if len(first_test_battle.get('battle_timeline', [])) > 3:
-            print("    ...")
-            print("    (battle_timeline has been truncated for display)")
-
-except FileNotFoundError:
-    print(f"❌ ERROR: Could not find the test file at '{test_file_path}'.")
-    print("Please make sure you have added the competition data to this notebook.")
-
 
 # # 2. Features Engineering
 
@@ -1083,506 +1024,359 @@ def new_features_deb(r):
         elif prob<0.4: f['outcome_prediction']=-1.0
         else: f['outcome_prediction']=0.0
     return f
-
 # ---------------------------------------------
-# Global stats built on train_data 
+# Public feature-engineering API for Model 3 (Mirko notebook)
 # ---------------------------------------------
-POKEMON_STATS    = build_pokemon_win_stats(train_data, alpha=1.0)
-POKEMON_HP_STATS = build_pokemon_hp_stats(train_data)
-pokemon_avg_damage = build_pokemon_avg_damage(train_data)
+def run_feature_engineering_mrk(
+    train_data: list[dict],
+    test_file_path: str,
+    alpha: float = 1.0,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Full feature engineering pipeline for the Mirko notebook model.
+    - Builds global Pokémon stats from train_data
+    - Extracts per-battle features for train and test
+    - Adds interaction features and engineered ratios
+    - Cleans types, clips HP-like features, and sanitizes infinities/NaNs
 
-# ---------------------------------------------
-# Full feature set (static + timeline + moves + Mirko & Deb)
-# ---------------------------------------------
-def _one_record_features(r):
-    # Static team features
-    t1 = r.get("p1_team_details", []) or []
-    lead = r.get("p2_lead_details", {}) or {}
-    t2 = [lead] if isinstance(lead, dict) and lead else []
+    Returns
+    -------
+    train_df : pd.DataFrame
+        Clean, engineered training features (unscaled).
+    test_df : pd.DataFrame
+        Clean, engineered test features (unscaled).
+    train_df_raw : pd.DataFrame
+        Raw feature frame before type-cleaning and clipping.
+    test_df_raw : pd.DataFrame
+        Raw test feature frame before type-cleaning and clipping.
+    """
+    import numpy as np
+    import pandas as pd
+    import json
 
-    p1sz = len(t1); p2sz = len(t2)
-    p1u  = unique_types(t1); p2u = unique_types(t2)
-    p1s  = sum_stats_of_team(t1); p2s = sum_stats_of_team(t2)
-    p1a  = avg_stats_of_team(t1); p2a = avg_stats_of_team(t2)
-    p2_ls, p2_la = sum_and_avg_of_single(lead) if lead else (0.0, 0.0)
-    p1v  = team_stat_variance(t1)
+    # ---------------------------------------------
+    # Global stats built on train_data
+    # (exposed as globals so _one_record_features can use them)
+    # ---------------------------------------------
+    global POKEMON_STATS, POKEMON_HP_STATS, pokemon_avg_damage
 
-    f = {
-        "p1_team_size": p1sz, "p2_team_size": p2sz,
-        "p1_unique_types": p1u, "p2_unique_types": p2u,
-        "p1_team_stat_sum": p1s, "p2_team_stat_sum": p2s,
-        "p1_team_stat_avg": p1a, "p2_team_stat_avg": p2a,
-        "diff_team_size": p1sz - p2sz,
-        "diff_unique_types": p1u - p2u,
-        "diff_team_stat_sum": p1s - p2s,
-        "diff_team_stat_avg": p1a - p2a,
-        "p2_lead_stat_sum": p2_ls, "p2_lead_stat_avg": p2_la,
-        "p1_sum_minus_p2_lead_sum": p1s - p2_ls,
-        "p1_avg_minus_p2_lead_avg": p1a - p2_la,
-        "p1_team_stat_var": p1v,
-        "ratio_p1_avg_over_p2_lead_avg": _safe_ratio(p1a, p2_la),
-    }
+    print("[Model 3] Building global Pokémon statistics from training data...")
+    POKEMON_STATS    = build_pokemon_win_stats(train_data, alpha=alpha)
+    POKEMON_HP_STATS = build_pokemon_hp_stats(train_data)
+    pokemon_avg_damage = build_pokemon_avg_damage(train_data)
 
-    # Speed advantage vs p2 lead
-    p1_mean_spe, p1_max_spe = _team_speed_stats(t1)
-    p2_lead_spe = float(lead.get("base_spe", 0.0)) if lead else 0.0
-    faster_cnt = sum(1 for p in t1 if isinstance(p.get("base_spe"),(int,float)) and float(p["base_spe"])>p2_lead_spe)
-    frac_faster = float(faster_cnt)/max(1,len(t1))
-    f.update({
-        "p1_mean_spe": p1_mean_spe, "p1_max_spe": p1_max_spe, "p2_lead_spe": p2_lead_spe,
-        "spe_mean_adv": p1_mean_spe - p2_lead_spe, "spe_max_adv": p1_max_spe - p2_lead_spe,
-        "p1_frac_faster_than_p2lead": frac_faster,
-    })
+    # ---------------------------------------------
+    # Run feature extraction
+    # ---------------------------------------------
+    print("[Model 3] Processing training data...")
+    train_df = create_simple_features(train_data)
 
-    # Timeline HP features
-    tl = get_timeline(r, max_turns=30)
-    p1, p2 = _extract_hp_series(tl)
-    diff = [a-b for a,b in zip(p1,p2)] if p1 and p2 and len(p1)==len(p2) else []
+    print("\n[Model 3] Processing test data from JSONL...")
+    test_records: list[dict] = []
+    with open(test_file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            test_records.append(json.loads(line))
+    test_df = create_simple_features(test_records)
 
-    p1m,p1l,p1s_,p1mn = _mean_last_std_min(p1)
-    p2m,p2l,p2s_,p2mn = _mean_last_std_min(p2)
-    dm,dl,ds,dmn = _mean_last_std_min(diff)
-
-    f.update({
-        "tl_turns_used": float(len(tl)),
-        "tl_p1_hp_mean": p1m, "tl_p1_hp_last": p1l, "tl_p1_hp_std": p1s_, "tl_p1_hp_min": p1mn,
-        "tl_p2_hp_mean": p2m, "tl_p2_hp_last": p2l, "tl_p2_hp_std": p2s_, "tl_p2_hp_min": p2mn,
-        "tl_hp_diff_mean": dm, "tl_hp_diff_last": dl, "tl_hp_diff_std": ds, "tl_hp_diff_min": dmn,
-        "tl_p1_hp_slope": _slope(p1), "tl_p2_hp_slope": _slope(p2), "tl_hp_diff_slope": _slope(diff),
-        "tl_p1_hp_auc": _auc_pct(p1), "tl_p2_hp_auc": _auc_pct(p2),
-        "tl_frac_turns_advantage": _frac_positive(diff),
-        "tl_p1_status_count": _status_count(tl,"p1"),
-        "tl_p2_status_count": _status_count(tl,"p2"),
-    })
-    f["tl_status_count"] = f["tl_p1_status_count"] + f["tl_p2_status_count"]
-    f["tl_p1_ko_count"]  = _ko_count(p1)
-    f["tl_p2_ko_count"]  = _ko_count(p2)
-    f["tl_ko_count"]     = f["tl_p1_ko_count"] + f["tl_p2_ko_count"]
-
-    # Type effectiveness P1 → P2 lead
-    p2_types = lead.get("types") or []
-    if isinstance(p2_types,str): p2_types=[p2_types]
-    p2_types=[t for t in p2_types if t]
-    f.update({
-        "ter_p1_vs_p2lead_full": _avg_type_eff_p1_vs_p2lead(tl, p2_types, window=None),
-        "ter_p1_vs_p2lead_5":    _avg_type_eff_p1_vs_p2lead(tl, p2_types, window=5),
-        "ter_p1_vs_p2lead_10":   _avg_type_eff_p1_vs_p2lead(tl, p2_types, window=10),
-    })
-
-    # --- New safe, bounded features (add near the end of _one_record_features) ---
-
-    # 1) Team offensive tilt: physical vs special (bounded, finite)
-    p1_sum_atk = float(sum(p.get("base_atk", 0) for p in t1 if isinstance(p, dict)))
-    p1_sum_spa = float(sum(p.get("base_spa", 0) for p in t1 if isinstance(p, dict)))
-    f["p1_offense_bias_ratio"] = (p1_sum_atk + 1e-3) / (p1_sum_spa + 1e-3)  # >1 => more physical tilt
-    f["p1_offense_balance_gap"] = p1_sum_atk - p1_sum_spa
-    
-    # 2) Defensive overlap: shared-weakness burden (small integers / means)
-    def _count_weaknesses_of_types(types):
-        prof = get_defensive_profile(types or [])
-        return float(sum(1 for m in prof.values() if m > 1.0))
-    
-    p1_weak_counts = []
-    for p in t1:
-        if isinstance(p, dict):
-            p1_weak_counts.append(_count_weaknesses_of_types(p.get("types", [])))
-    
-    f["p1_weakness_mean"] = float(np.mean(p1_weak_counts)) if p1_weak_counts else 0.0
-    f["p1_weakness_max"]  = float(np.max(p1_weak_counts))  if p1_weak_counts else 0.0
-    
-    # 3) Breadth of resistances (unique resistances union)
-    def _unique_resistances(types):
-        prof = get_defensive_profile(types or [])
-        return {atk for atk, mult in prof.items() if 0.0 < mult < 1.0}
-    
-    res_sets = []
-    for p in t1:
-        if isinstance(p, dict):
-            res_sets.append(_unique_resistances(p.get("types", [])))
-    union_res = set().union(*res_sets) if res_sets else set()
-    f["p1_unique_resistances"] = float(len(union_res))
-    
-    # 4) Early HP volatility (first 5 turns), bounded by [0,100] deltas
-    def _safe_clip_hp(seq):
-        return [max(0.0, min(100.0, float(x))) for x in seq]
-    
-    def _mean_abs_step(arr):
-        return float(np.mean([abs(arr[i] - arr[i-1]) for i in range(1, len(arr))])) if len(arr) > 1 else 0.0
-    
-    p1_hp5 = _safe_clip_hp(_window(p1, 5))
-    p2_hp5 = _safe_clip_hp(_window(p2, 5))
-    f["p1_hp_abs_step_5"] = _mean_abs_step(p1_hp5)
-    f["p2_hp_abs_step_5"] = _mean_abs_step(p2_hp5)
-    f["hp_abs_step_gap_5"] = f["p1_hp_abs_step_5"] - f["p2_hp_abs_step_5"]
-    
-    # 5) Hazards effectiveness given switches (difference version; robust via f.get)
-    haz_p1 = float(f.get("hazard_p1_flag", 0.0))
-    haz_p2 = float(f.get("hazard_p2_flag", 0.0))
-    sw_p1  = float(f.get("switch_p1_count", 0.0))
-    sw_p2  = float(f.get("switch_p2_count", 0.0))
-    haz_sw_p1 = haz_p1 * sw_p2
-    haz_sw_p2 = haz_p2 * sw_p1
-    f["hazard_switch_pressure_diff"] = haz_sw_p1 - haz_sw_p2
-    
-    # 6) Late-game move accuracy advantage (last 5 turns), safe mean
-    def _avg_acc_lastN(timeline, who, n=5):
-        seq = timeline[-n:] if len(timeline) >= n else timeline
-        accs = []
-        for t in seq:
-            md = (t.get(f"{who}_move_details") or {})
-            a = md.get("accuracy", None)
-            if isinstance(a, (int, float)):
-                accs.append(float(a))
-        return float(np.mean(accs)) if accs else 0.0
-    
-    f["late_acc_adv_5"] = _avg_acc_lastN(tl, "p1", 5) - _avg_acc_lastN(tl, "p2", 5)
-
-    # --- Move-based features (full & 5 turns) ---
-    mv1_full = _move_stats_for_side(tl, "p1", None)
-    mv2_full = _move_stats_for_side(tl, "p2", None)
-    f.update(mv1_full); f.update(mv2_full)
-    f["mv_power_mean_ratio"]  = _safe_ratio(mv1_full["mv_p1_power_mean"], mv2_full["mv_p2_power_mean"])
-    mv1_5 = _move_stats_for_side(tl, "p1", 5)
-    mv2_5 = _move_stats_for_side(tl, "p2", 5)
-    f.update(mv1_5); f.update(mv2_5)
-    
-    f["mv_power_mean_ratio_5"] = _safe_ratio(mv1_5["mv_p1_power_mean_5"], mv2_5["mv_p2_power_mean_5"])
-    
-    # Matchup / switches / hazards / momentum / recovery / STAB / early / priority
-    f.update(_p1_vs_p2lead_matchup_index(r, tl))
-    f["switch_p1_count"]=_switch_count(tl,"p1"); f["switch_p2_count"]=_switch_count(tl,"p2")
-    f["switch_count_diff"]=f["switch_p1_count"]-f["switch_p2_count"]
-    f.update(_hazard_flags(tl))
-    f.update(_recovery_pressure(tl))
-    f.update(_stab_features(r, max_turns=30))
-    f.update(_early_momentum_features(r, first_n=3))
-    f.update(_priority_feature_block(r))
-    f.update(new_features(r))
-    f.update(new_features_deb(r))
-    f.update(new_features_mirko(r))
-
-    # Team Winrate / HP resilience / Avg damage
+    print("\n[Model 3] Training features preview (raw, before extra interactions):")
+    # display is available in notebook environment; safe in Kaggle
     try:
-        p1_team_names=_pnames_from_p1_team(r)
-        f["p1_team_winrate_score"]=team_score_from_stats(p1_team_names, POKEMON_STATS, default_wr=0.5)
+        display(train_df.head())
     except Exception:
-        f["p1_team_winrate_score"]=0.5
-    p1_names=_pnames_from_p1_team(r)
-    p2_name=_pname_from_p2_lead(r)
-    f["p1_team_avg_hp_score"]=team_hp_score(p1_names, POKEMON_HP_STATS)
-    f["p2_lead_avg_hp"]=POKEMON_HP_STATS.get(p2_name,{}).get("hp_mean",50.0)
-    f["hp_resilience_diff"]=f["p1_team_avg_hp_score"] - f["p2_lead_avg_hp"]
-    f["predicted_win_by_hp"]=1.0 if f["hp_resilience_diff"]>0 else 0.0
+        pass
 
-    f.update(damage_feature_for_battle(r, pokemon_avg_damage))
+    # ---------------------------------------------
+    # Manual interaction features (robust to missing columns)
+    # ---------------------------------------------
+    def _maybe_add_interactions(df: pd.DataFrame) -> pd.DataFrame:
+        def safe_mul(a, b, name):
+            if a in df.columns and b in df.columns:
+                df[name] = df[a] * df[b]
 
-    # IDs / target
-    f["battle_id"]=r.get("battle_id")
-    if "player_won" in r:
-        f["player_won"]= int(r["player_won"]) if isinstance(r["player_won"], bool) else r["player_won"]
-    return f
+        # Team strength × move power (full)
+        safe_mul("p1_team_stat_avg", "mv_p1_power_mean", "ix_p1avg_x_p1pow")
+        # Speed × priority advantage (first 5 turns if available)
+        if "spe_max_adv" in df.columns and "mv_priority_count_diff_5" in df.columns:
+            df["ix_speed_x_prio5"] = df["spe_max_adv"] * df["mv_priority_count_diff_5"]
+        # HP momentum × fraction of advantaged turns
+        safe_mul("tl_hp_diff_mean", "tl_frac_turns_advantage", "ix_hpmean_x_fracadv")
+        # Early momentum × priority diff (first 5 turns)
+        if "early_hp_diff_mean_3" in df.columns and "mv_priority_count_diff_5" in df.columns:
+            df["ix_early3_x_prio5"] = df["early_hp_diff_mean_3"] * df["mv_priority_count_diff_5"]
+        # STAB advantage × early KO score
+        if "stab_stab_ratio_diff_full" in df.columns and "early_first_ko_score_3" in df.columns:
+            df["ix_stabdiff_x_firstko"] = df["stab_stab_ratio_diff_full"] * df["early_first_ko_score_3"]
+        # Type effectiveness × STAB (full)
+        if "ter_p1_vs_p2lead_full" in df.columns and "stab_stab_ratio_diff_full" in df.columns:
+            df["ix_ter_x_stab_full"] = df["ter_p1_vs_p2lead_full"] * df["stab_stab_ratio_diff_full"]
+        # Type effectiveness × early momentum (first 3)
+        if "ter_p1_vs_p2lead_5" in df.columns and "early_hp_diff_mean_3" in df.columns:
+            df["ix_ter5_x_early3"] = df["ter_p1_vs_p2lead_5"] * df["early_hp_diff_mean_3"]
+        # Lead matchup × early momentum
+        if "lead_matchup_p1_index_5" in df.columns and "early_hp_diff_mean_3" in df.columns:
+            df["ix_leadmatch5_x_early3"] = df["lead_matchup_p1_index_5"] * df["early_hp_diff_mean_3"]
+        # Hazards advantage × priority pressure
+        if "hazard_flag_diff" in df.columns and "mv_priority_count_diff_5" in df.columns:
+            df["ix_hazards_x_prio5"] = df["hazard_flag_diff"] * df["mv_priority_count_diff_5"]
+        return df
 
-# ---------------------------------------------
-# Public API (same name & return type as starter)
-# ---------------------------------------------
-def create_simple_features(data: list[dict]) -> pd.DataFrame:
-    rows=[]
-    for battle in tqdm(data, desc="Extracting features"):
-        rows.append(_one_record_features(battle))
-    return pd.DataFrame(rows).fillna(0)
+    train_df = _maybe_add_interactions(train_df)
+    test_df  = _maybe_add_interactions(test_df)
 
-# ---------------------------------------------
-# Run feature extraction
-# ---------------------------------------------
-print("Processing training data...")
-train_df = create_simple_features(train_data)
+    # Keep raw copies before numeric cleaning
+    train_df_raw = train_df.copy()
+    test_df_raw  = test_df.copy()
 
-print("\nProcessing test data...")
-test_data = []
-with open(test_file_path, 'r', encoding='utf-8') as f:
-    for line in f:
-        test_data.append(json.loads(line))
-test_df = create_simple_features(test_data)
+    # ---------------------------------------------
+    # Numeric cleanup: types, inf, clipping HP-like features
+    # ---------------------------------------------
+    # 1) Ensure numeric features are float32 (keep ids/target as is)
+    num_cols = [c for c in train_df.columns if c not in ("battle_id", "player_won")]
+    train_df[num_cols] = train_df[num_cols].apply(pd.to_numeric, errors="coerce").astype("float32")
+    test_df[num_cols]  = test_df[num_cols].apply(pd.to_numeric, errors="coerce").astype("float32")
 
-print("\nTraining features preview:")
+    # 2) Replace inf/-inf with NaN (safer downstream)
+    tr_vals = train_df[num_cols].to_numpy()
+    te_vals = test_df[num_cols].to_numpy()
+    tr_vals[~np.isfinite(tr_vals)] = np.nan
+    te_vals[~np.isfinite(te_vals)] = np.nan
+    train_df[num_cols] = tr_vals
+    test_df[num_cols]  = te_vals
 
-# --- Manual interactions (robust to missing columns) ---
-def _maybe_add_interactions(df: pd.DataFrame) -> pd.DataFrame:
-    def safe_mul(a, b, name):
-        if a in df.columns and b in df.columns:
-            df[name] = df[a] * df[b]
+    # 3) Clip percent-like fields to [0, 100]
+    num_only = train_df.drop(columns=["battle_id", "player_won"], errors="ignore").select_dtypes(include=[np.number])
+    percent_like = [x for x in num_only.columns if ("hp" in x.lower()) or ("auc" in x.lower())]
+    for c in percent_like:
+        if c in train_df.columns:
+            train_df[c] = train_df[c].clip(lower=0, upper=100)
+            test_df[c]  = test_df[c].clip(lower=0, upper=100)
 
-    # Team strength × move power (full)
-    safe_mul("p1_team_stat_avg", "mv_p1_power_mean", "ix_p1avg_x_p1pow")
-    # Speed × priority advantage (first 5 turns if available)
-    if "spe_max_adv" in df.columns and "mv_priority_count_diff_5" in df.columns:
-        df["ix_speed_x_prio5"] = df["spe_max_adv"] * df["mv_priority_count_diff_5"]
-    # HP momentum × fraction of advantaged turns
-    safe_mul("tl_hp_diff_mean", "tl_frac_turns_advantage", "ix_hpmean_x_fracadv")
-    # Early momentum × priority diff (first 5)
-    if "early_hp_diff_mean_3" in df.columns and "mv_priority_count_diff_5" in df.columns:
-        df["ix_early3_x_prio5"] = df["early_hp_diff_mean_3"] * df["mv_priority_count_diff_5"]
-    # STAB advantage × early KO score
-    if "stab_stab_ratio_diff_full" in df.columns and "early_first_ko_score_3" in df.columns:
-        df["ix_stabdiff_x_firstko"] = df["stab_stab_ratio_diff_full"] * df["early_first_ko_score_3"]
-    # Type effectiveness × STAB (full)
-    if "ter_p1_vs_p2lead_full" in df.columns and "stab_stab_ratio_diff_full" in df.columns:
-        df["ix_ter_x_stab_full"] = df["ter_p1_vs_p2lead_full"] * df["stab_stab_ratio_diff_full"]
-    # Type effectiveness × early momentum (first 3)
-    if "ter_p1_vs_p2lead_5" in df.columns and "early_hp_diff_mean_3" in df.columns:
-        df["ix_ter5_x_early3"] = df["ter_p1_vs_p2lead_5"] * df["early_hp_diff_mean_3"]
-    # Lead matchup × early momentum
-    if "lead_matchup_p1_index_5" in df.columns and "early_hp_diff_mean_3" in df.columns:
-        df["ix_leadmatch5_x_early3"] = df["lead_matchup_p1_index_5"] * df["early_hp_diff_mean_3"]
-    # Hazards advantage × priority pressure
-    if "hazard_flag_diff" in df.columns and "mv_priority_count_diff_5" in df.columns:
-        df["ix_hazards_x_prio5"] = df["hazard_flag_diff"] * df["mv_priority_count_diff_5"]
-    return df
+    # 4) Flag near-constants (≥99% same value) — information only
+    near_const = [
+        c for c in num_only.columns
+        if (num_only[c].nunique(dropna=True) / max(1, len(num_only)) < 0.01)
+    ]
+    print(f"[Model 3][Sanity] Near-constant features (not dropping): {len(near_const)}")
 
-train_df = _maybe_add_interactions(train_df)
-test_df  = _maybe_add_interactions(test_df)
+    # ---------------------------------------------
+    # 2.x Custom predictive features (safe: no NaN, no div-by-zero)
+    # ---------------------------------------------
+    EPS = 1e-6
+    REPLACE_EXISTING = True  # if False, do not overwrite existing columns
 
-# Keep raw copies
-train_df_raw = train_df.copy()
-test_df_raw  = test_df.copy()
+    def _pick_first(df: pd.DataFrame, candidates, default_value=0.0):
+        """Return the first existing column from candidates; else a float32 Series filled with default_value."""
+        for c in candidates:
+            if c in df.columns:
+                return df[c].astype("float32")
+        return pd.Series(default_value, index=df.index, dtype="float32")
 
-# ---- No scaling here (we'll scale inside the Pipeline in Cell 3.2) ----
-# 1) Make sure features are numeric, to avoid casting issues downstream
-num_cols = [c for c in train_df.columns if c not in ("battle_id", "player_won")]
-train_df[num_cols] = train_df[num_cols].apply(pd.to_numeric, errors="coerce").astype("float32")
-test_df[num_cols]  = test_df[num_cols].apply(pd.to_numeric, errors="coerce").astype("float32")
+    def _safe_div(a: pd.Series, b: pd.Series):
+        """Elementwise safe division a/(b+EPS) with finite output."""
+        out = a.astype("float32") / (b.astype("float32") + EPS)
+        out = out.replace([np.inf, -np.inf], 0.0).fillna(0.0).astype("float32")
+        return out
 
-# 2) Replace inf/-inf with NaN (safer for imputers)
-tr_vals = train_df[num_cols].to_numpy()
-te_vals = test_df[num_cols].to_numpy()
-tr_vals[~np.isfinite(tr_vals)] = np.nan
-te_vals[~np.isfinite(te_vals)] = np.nan
-train_df[num_cols] = tr_vals
-test_df[num_cols]  = te_vals
+    def _ensure_float32(s: pd.Series):
+        return s.astype("float32").replace([np.inf, -np.inf], 0.0).fillna(0.0)
 
-# 3) Clip percent-like fields to sensible bounds (do it raw, not scaled)
-num_only = train_df.drop(columns=["battle_id","player_won"], errors="ignore").select_dtypes(include=[np.number])
-percent_like = [x for x in num_only.columns if ("hp" in x.lower()) or ("auc" in x.lower())]
-for c in percent_like:
-    if c in train_df.columns:
-        train_df[c] = train_df[c].clip(lower=0, upper=100)
-        test_df[c]  = test_df[c].clip(lower=0, upper=100)
+    def _normalize_acc(s: pd.Series):
+        """If accuracy looks like [0..100], scale to [0..1]."""
+        s = _ensure_float32(s)
+        if len(s):
+            maxv = float(np.nanmax(s.values))
+        else:
+            maxv = 0.0
+        if maxv > 1.5:  # heuristically assume it's a percentage
+            s = s / 100.0
+        return s.clip(0.0, 1.0)
 
-# 4) Flag near-constants (≥99% same value) — info only
-near_const = [c for c in num_only.columns if (num_only[c].nunique(dropna=True) / max(1, len(num_only)) < 0.01)]
-print(f"[Sanity] Near-constant features (not dropping yet): {len(near_const)}")
+    def _add_feature_pair(train_df_local, test_df_local, name, train_series, test_series):
+        """Attach float32 features to both train and test with final sanitation."""
+        if (not REPLACE_EXISTING) and (name in train_df_local.columns or name in test_df_local.columns):
+            return
+        train_df_local[name] = _ensure_float32(train_series)
+        test_df_local[name]  = _ensure_float32(test_series)
 
-# === 2.x Custom predictive features (safe: no NaN, no div-by-zero) ===
+    # --- Robust base columns (try multiple candidates, fall back to zeros) ---
 
-import numpy as np
-import pandas as pd
+    # Attack / Defense (means)
+    atk_p1 = _pick_first(train_df, ["atk_p1_mean","atk_p1","atk_p1_full"], 0.0)
+    atk_p2 = _pick_first(train_df, ["atk_p2_mean","atk_p2","atk_p2_full"], 0.0)
+    def_p1 = _pick_first(train_df, ["def_p1_mean","def_p1","def_p1_full"], 0.0)
+    def_p2 = _pick_first(train_df, ["def_p2_mean","def_p2","def_p2_full"], 0.0)
 
-EPS = 1e-6
-REPLACE_EXISTING = True  # set to False to skip creation if a feature name already exists
+    atk_p1_te = _pick_first(test_df, ["atk_p1_mean","atk_p1","atk_p1_full"], 0.0)
+    atk_p2_te = _pick_first(test_df, ["atk_p2_mean","atk_p2","atk_p2_full"], 0.0)
+    def_p1_te = _pick_first(test_df, ["def_p1_mean","def_p1","def_p1_full"], 0.0)
+    def_p2_te = _pick_first(test_df, ["def_p2_mean","def_p2","def_p2_full"], 0.0)
 
-def _pick_first(df: pd.DataFrame, candidates, default_value=0.0):
-    """Return the first existing column from candidates; else a float32 Series filled with default_value."""
-    for c in candidates:
-        if c in df.columns:
-            return df[c].astype("float32")
-    return pd.Series(default_value, index=df.index, dtype="float32")
+    # Special Attack / Defense (means)
+    sp_atk_p1 = _pick_first(train_df, ["sp_atk_p1_mean","spatk_p1_mean","spa_p1_mean","sp_atk_p1"], 0.0)
+    sp_atk_p2 = _pick_first(train_df, ["sp_atk_p2_mean","spatk_p2_mean","spa_p2_mean","sp_atk_p2"], 0.0)
+    sp_def_p1 = _pick_first(train_df, ["sp_def_p1_mean","spdef_p1_mean","spd_p1_mean_def","sp_def_p1"], 0.0)
+    sp_def_p2 = _pick_first(train_df, ["sp_def_p2_mean","spdef_p2_mean","spd_p2_mean_def","sp_def_p2"], 0.0)
 
-def _safe_div(a: pd.Series, b: pd.Series):
-    """Elementwise safe division a/(b+EPS) with finite output."""
-    out = a.astype("float32") / (b.astype("float32") + EPS)
-    out = out.replace([np.inf, -np.inf], 0.0).fillna(0.0).astype("float32")
-    return out
+    sp_atk_p1_te = _pick_first(test_df, ["sp_atk_p1_mean","spatk_p1_mean","spa_p1_mean","sp_atk_p1"], 0.0)
+    sp_atk_p2_te = _pick_first(test_df, ["sp_atk_p2_mean","spatk_p2_mean","spa_p2_mean","sp_atk_p2"], 0.0)
+    sp_def_p1_te = _pick_first(test_df, ["sp_def_p1_mean","spdef_p1_mean","spd_p1_mean_def","sp_def_p1"], 0.0)
+    sp_def_p2_te = _pick_first(test_df, ["sp_def_p2_mean","spdef_p2_mean","spd_p2_mean_def","sp_def_p2"], 0.0)
 
-def _ensure_float32(s: pd.Series):
-    return s.astype("float32").replace([np.inf, -np.inf], 0.0).fillna(0.0)
+    # Speed (means)
+    spd_p1 = _pick_first(train_df, ["spd_p1_mean","speed_p1_mean","spd_p1"], 0.0)
+    spd_p2 = _pick_first(train_df, ["spd_p2_mean","speed_p2_mean","spd_p2"], 0.0)
+    spd_p1_te = _pick_first(test_df,  ["spd_p1_mean","speed_p1_mean","spd_p1"], 0.0)
+    spd_p2_te = _pick_first(test_df,  ["spd_p2_mean","speed_p2_mean","spd_p2"], 0.0)
 
-def _normalize_acc(s: pd.Series):
-    """If accuracy looks like [0..100], scale to [0..1]."""
-    s = _ensure_float32(s)
-    if len(s):
-        maxv = float(np.nanmax(s.values))
-    else:
-        maxv = 0.0
-    if maxv > 1.5:  # heuristically assume it's a percentage
-        s = s / 100.0
-    return s.clip(0.0, 1.0)
+    # HP current / max
+    hp1_cur = _pick_first(train_df, ["hp_p1_remain","hp_p1_curr","hp_p1"], 0.0)
+    hp2_cur = _pick_first(train_df, ["hp_p2_remain","hp_p2_curr","hp_p2"], 0.0)
+    hp1_max = _pick_first(train_df, ["hp_p1_max","hp_p1_base","hp_p1_total"], 1.0)
+    hp2_max = _pick_first(train_df, ["hp_p2_max","hp_p2_base","hp_p2_total"], 1.0)
 
-def _add_feature_pair(train_df, test_df, name, train_series, test_series):
-    """Attach float32 features to both train and test with final sanitation."""
-    if (not REPLACE_EXISTING) and (name in train_df.columns or name in test_df.columns):
-        return
-    train_df[name] = _ensure_float32(train_series)
-    test_df[name]  = _ensure_float32(test_series)
+    hp1_cur_te = _pick_first(test_df, ["hp_p1_remain","hp_p1_curr","hp_p1"], 0.0)
+    hp2_cur_te = _pick_first(test_df, ["hp_p2_remain","hp_p2_curr","hp_p2"], 0.0)
+    hp1_max_te = _pick_first(test_df, ["hp_p1_max","hp_p1_base","hp_p1_total"], 1.0)
+    hp2_max_te = _pick_first(test_df, ["hp_p2_max","hp_p2_base","hp_p2_total"], 1.0)
 
-# --- Robust base columns (try multiple candidates, fall back to zeros) ---
+    # Move power / accuracy
+    pwr_p1 = _pick_first(train_df, ["mv_p1_power_mean_full","mv_p1_power_mean","mv_power_p1_mean"], 0.0)
+    pwr_p2 = _pick_first(train_df, ["mv_p2_power_mean_full","mv_p2_power_mean","mv_power_p2_mean"], 0.0)
+    acc_p1 = _normalize_acc(_pick_first(train_df, ["mv_p1_acc_mean_full","mv_p1_acc_mean","mv_acc_p1_mean"], 0.0))
+    acc_p2 = _normalize_acc(_pick_first(train_df, ["mv_p2_acc_mean_full","mv_p2_acc_mean","mv_acc_p2_mean"], 0.0))
 
-# Attack / Defense (means)
-atk_p1 = _pick_first(train_df, ["atk_p1_mean","atk_p1","atk_p1_full"], 0.0)
-atk_p2 = _pick_first(train_df, ["atk_p2_mean","atk_p2","atk_p2_full"], 0.0)
-def_p1 = _pick_first(train_df, ["def_p1_mean","def_p1","def_p1_full"], 0.0)
-def_p2 = _pick_first(train_df, ["def_p2_mean","def_p2","def_p2_full"], 0.0)
+    pwr_p1_te = _pick_first(test_df, ["mv_p1_power_mean_full","mv_p1_power_mean","mv_power_p1_mean"], 0.0)
+    pwr_p2_te = _pick_first(test_df, ["mv_p2_power_mean_full","mv_p2_power_mean","mv_power_p2_mean"], 0.0)
+    acc_p1_te = _normalize_acc(_pick_first(test_df, ["mv_p1_acc_mean_full","mv_p1_acc_mean","mv_acc_p1_mean"], 0.0))
+    acc_p2_te = _normalize_acc(_pick_first(test_df, ["mv_p2_acc_mean_full","mv_p2_acc_mean","mv_acc_p2_mean"], 0.0))
 
-atk_p1_te = _pick_first(test_df, ["atk_p1_mean","atk_p1","atk_p1_full"], 0.0)
-atk_p2_te = _pick_first(test_df, ["atk_p2_mean","atk_p2","atk_p2_full"], 0.0)
-def_p1_te = _pick_first(test_df, ["def_p1_mean","def_p1","def_p1_full"], 0.0)
-def_p2_te = _pick_first(test_df, ["def_p2_mean","def_p2","def_p2_full"], 0.0)
+    # Move type counts (STATUS / PHYSICAL / SPECIAL)
+    st_p1 = _pick_first(train_df, ["mv_p1_count_STATUS_full","mv_p1_count_STATUS","status_moves_p1"], 0.0)
+    ph_p1 = _pick_first(train_df, ["mv_p1_count_PHYSICAL_full","mv_p1_count_PHYSICAL","physical_moves_p1"], 0.0)
+    sp_p1 = _pick_first(train_df, ["mv_p1_count_SPECIAL_full","mv_p1_count_SPECIAL","special_moves_p1"], 0.0)
+    st_p2 = _pick_first(train_df, ["mv_p2_count_STATUS_full","mv_p2_count_STATUS","status_moves_p2"], 0.0)
+    ph_p2 = _pick_first(train_df, ["mv_p2_count_PHYSICAL_full","mv_p2_count_PHYSICAL","physical_moves_p2"], 0.0)
+    sp_p2 = _pick_first(train_df, ["mv_p2_count_SPECIAL_full","mv_p2_count_SPECIAL","special_moves_p2"], 0.0)
 
-# Special Attack / Defense (means)
-sp_atk_p1 = _pick_first(train_df, ["sp_atk_p1_mean","spatk_p1_mean","spa_p1_mean","sp_atk_p1"], 0.0)
-sp_atk_p2 = _pick_first(train_df, ["sp_atk_p2_mean","spatk_p2_mean","spa_p2_mean","sp_atk_p2"], 0.0)
-sp_def_p1 = _pick_first(train_df, ["sp_def_p1_mean","spdef_p1_mean","spd_p1_mean_def","sp_def_p1"], 0.0)
-sp_def_p2 = _pick_first(train_df, ["sp_def_p2_mean","spdef_p2_mean","spd_p2_mean_def","sp_def_p2"], 0.0)
+    st_p1_te = _pick_first(test_df, ["mv_p1_count_STATUS_full","mv_p1_count_STATUS","status_moves_p1"], 0.0)
+    ph_p1_te = _pick_first(test_df, ["mv_p1_count_PHYSICAL_full","mv_p1_count_PHYSICAL","physical_moves_p1"], 0.0)
+    sp_p1_te = _pick_first(test_df, ["mv_p1_count_SPECIAL_full","mv_p1_count_SPECIAL","special_moves_p1"], 0.0)
+    st_p2_te = _pick_first(test_df, ["mv_p2_count_STATUS_full","mv_p2_count_STATUS","status_moves_p2"], 0.0)
+    ph_p2_te = _pick_first(test_df, ["mv_p2_count_PHYSICAL_full","mv_p2_count_PHYSICAL","physical_moves_p2"], 0.0)
+    sp_p2_te = _pick_first(test_df, ["mv_p2_count_SPECIAL_full","mv_p2_count_SPECIAL","special_moves_p2"], 0.0)
 
-sp_atk_p1_te = _pick_first(test_df, ["sp_atk_p1_mean","spatk_p1_mean","spa_p1_mean","sp_atk_p1"], 0.0)
-sp_atk_p2_te = _pick_first(test_df, ["sp_atk_p2_mean","spatk_p2_mean","spa_p2_mean","sp_atk_p2"], 0.0)
-sp_def_p1_te = _pick_first(test_df, ["sp_def_p1_mean","spdef_p1_mean","spd_p1_mean_def","sp_def_p1"], 0.0)
-sp_def_p2_te = _pick_first(test_df, ["sp_def_p2_mean","spdef_p2_mean","spd_p2_mean_def","sp_def_p2"], 0.0)
+    # ===============================
+    # 10 SAFE, HIGH-SIGNAL FEATURES
+    # ===============================
 
-# Speed (means)
-spd_p1 = _pick_first(train_df, ["spd_p1_mean","speed_p1_mean","spd_p1"], 0.0)
-spd_p2 = _pick_first(train_df, ["spd_p2_mean","speed_p2_mean","spd_p2"], 0.0)
-spd_p1_te = _pick_first(test_df,  ["spd_p1_mean","speed_p1_mean","spd_p1"], 0.0)
-spd_p2_te = _pick_first(test_df,  ["spd_p2_mean","speed_p2_mean","spd_p2"], 0.0)
+    # 1) atk_def_ratio: P1 attack vs P2 defense
+    _add_feature_pair(
+        train_df, test_df, "atk_def_ratio",
+        _safe_div(atk_p1, def_p2),
+        _safe_div(atk_p1_te, def_p2_te)
+    )
 
-# HP current / max
-hp1_cur = _pick_first(train_df, ["hp_p1_remain","hp_p1_curr","hp_p1"], 0.0)
-hp2_cur = _pick_first(train_df, ["hp_p2_remain","hp_p2_curr","hp_p2"], 0.0)
-hp1_max = _pick_first(train_df, ["hp_p1_max","hp_p1_base","hp_p1_total"], 1.0)
-hp2_max = _pick_first(train_df, ["hp_p2_max","hp_p2_base","hp_p2_total"], 1.0)
+    # 2) spd_gap: P1 speed minus P2 speed
+    _add_feature_pair(
+        train_df, test_df, "spd_gap",
+        (spd_p1 - spd_p2),
+        (spd_p1_te - spd_p2_te)
+    )
 
-hp1_cur_te = _pick_first(test_df, ["hp_p1_remain","hp_p1_curr","hp_p1"], 0.0)
-hp2_cur_te = _pick_first(test_df, ["hp_p2_remain","hp_p2_curr","hp_p2"], 0.0)
-hp1_max_te = _pick_first(test_df, ["hp_p1_max","hp_p1_base","hp_p1_total"], 1.0)
-hp2_max_te = _pick_first(test_df, ["hp_p2_max","hp_p2_base","hp_p2_total"], 1.0)
+    # 3) hp_ratio: P1 current HP vs P2 current HP
+    _add_feature_pair(
+        train_df, test_df, "hp_ratio",
+        _safe_div(hp1_cur, hp2_cur),
+        _safe_div(hp1_cur_te, hp2_cur_te)
+    )
 
-# Move power / accuracy
-pwr_p1 = _pick_first(train_df, ["mv_p1_power_mean_full","mv_p1_power_mean","mv_power_p1_mean"], 0.0)
-pwr_p2 = _pick_first(train_df, ["mv_p2_power_mean_full","mv_p2_power_mean","mv_power_p2_mean"], 0.0)
-acc_p1 = _normalize_acc(_pick_first(train_df, ["mv_p1_acc_mean_full","mv_p1_acc_mean","mv_acc_p1_mean"], 0.0))
-acc_p2 = _normalize_acc(_pick_first(train_df, ["mv_p2_acc_mean_full","mv_p2_acc_mean","mv_acc_p2_mean"], 0.0))
+    # 4) survival_score: (P1 HP%) - (P2 HP%)
+    _add_feature_pair(
+        train_df, test_df, "survival_score",
+        _safe_div(hp1_cur, hp1_max) - _safe_div(hp2_cur, hp2_max),
+        _safe_div(hp1_cur_te, hp1_max_te) - _safe_div(hp2_cur_te, hp2_max_te)
+    )
 
-pwr_p1_te = _pick_first(test_df, ["mv_p1_power_mean_full","mv_p1_power_mean","mv_power_p1_mean"], 0.0)
-pwr_p2_te = _pick_first(test_df, ["mv_p2_power_mean_full","mv_p2_power_mean","mv_power_p2_mean"], 0.0)
-acc_p1_te = _normalize_acc(_pick_first(test_df, ["mv_p1_acc_mean_full","mv_p1_acc_mean","mv_acc_p1_mean"], 0.0))
-acc_p2_te = _normalize_acc(_pick_first(test_df, ["mv_p2_acc_mean_full","mv_p2_acc_mean","mv_acc_p2_mean"], 0.0))
+    # 5) momentum_index: (atk*spd)_P1 / (atk*spd)_P2
+    _add_feature_pair(
+        train_df, test_df, "momentum_index",
+        _safe_div(atk_p1 * spd_p1, atk_p2 * spd_p2),
+        _safe_div(atk_p1_te * spd_p1_te, atk_p2_te * spd_p2_te)
+    )
 
-# Move type counts (STATUS / PHYSICAL / SPECIAL) — safe fallbacks
-st_p1 = _pick_first(train_df, ["mv_p1_count_STATUS_full","mv_p1_count_STATUS","status_moves_p1"], 0.0)
-ph_p1 = _pick_first(train_df, ["mv_p1_count_PHYSICAL_full","mv_p1_count_PHYSICAL","physical_moves_p1"], 0.0)
-sp_p1 = _pick_first(train_df, ["mv_p1_count_SPECIAL_full","mv_p1_count_SPECIAL","special_moves_p1"], 0.0)
-st_p2 = _pick_first(train_df, ["mv_p2_count_STATUS_full","mv_p2_count_STATUS","status_moves_p2"], 0.0)
-ph_p2 = _pick_first(train_df, ["mv_p2_count_PHYSICAL_full","mv_p2_count_PHYSICAL","physical_moves_p2"], 0.0)
-sp_p2 = _pick_first(train_df, ["mv_p2_count_SPECIAL_full","mv_p2_count_SPECIAL","special_moves_p2"], 0.0)
+    # 6) power_acc_gap: (avg power weighted by acc) P1 - P2
+    pwa_p1 = _ensure_float32(pwr_p1 * acc_p1)
+    pwa_p2 = _ensure_float32(pwr_p2 * acc_p2)
+    pwa_p1_te = _ensure_float32(pwr_p1_te * acc_p1_te)
+    pwa_p2_te = _ensure_float32(pwr_p2_te * acc_p2_te)
+    _add_feature_pair(
+        train_df, test_df, "power_acc_gap",
+        (pwa_p1 - pwa_p2),
+        (pwa_p1_te - pwa_p2_te)
+    )
 
-st_p1_te = _pick_first(test_df, ["mv_p1_count_STATUS_full","mv_p1_count_STATUS","status_moves_p1"], 0.0)
-ph_p1_te = _pick_first(test_df, ["mv_p1_count_PHYSICAL_full","mv_p1_count_PHYSICAL","physical_moves_p1"], 0.0)
-sp_p1_te = _pick_first(test_df, ["mv_p1_count_SPECIAL_full","mv_p1_count_SPECIAL","special_moves_p1"], 0.0)
-st_p2_te = _pick_first(test_df, ["mv_p2_count_STATUS_full","mv_p2_count_STATUS","status_moves_p2"], 0.0)
-ph_p2_te = _pick_first(test_df, ["mv_p2_count_PHYSICAL_full","mv_p2_count_PHYSICAL","physical_moves_p2"], 0.0)
-sp_p2_te = _pick_first(test_df, ["mv_p2_count_SPECIAL_full","mv_p2_count_SPECIAL","special_moves_p2"], 0.0)
+    # 7) offensive_balance: (atk + sp_atk) P1 / P2
+    _add_feature_pair(
+        train_df, test_df, "offensive_balance",
+        _safe_div(atk_p1 + sp_atk_p1, atk_p2 + sp_atk_p2),
+        _safe_div(atk_p1_te + sp_atk_p1_te, atk_p2_te + sp_atk_p2_te)
+    )
 
-# ===============================
-# 10 SAFE, HIGH-SIGNAL FEATURES
-# ===============================
+    # 8) defensive_efficiency: (def + sp_def) P1 / P2
+    _add_feature_pair(
+        train_df, test_df, "defensive_efficiency",
+        _safe_div(def_p1 + sp_def_p1, def_p2 + sp_def_p2),
+        _safe_div(def_p1_te + sp_def_p1_te, def_p2_te + sp_def_p2_te)
+    )
 
-# 1) atk_def_ratio: P1 attack vs P2 defense
-_add_feature_pair(
-    train_df, test_df, "atk_def_ratio",
-    _safe_div(atk_p1, def_p2),
-    _safe_div(atk_p1_te, def_p2_te)
-)
+    # 9) status_influence: share STATUS moves P1 - P2
+    tot_p1 = _ensure_float32(st_p1 + ph_p1 + sp_p1).replace(0.0, 1.0)
+    tot_p2 = _ensure_float32(st_p2 + ph_p2 + sp_p2).replace(0.0, 1.0)
+    tot_p1_te = _ensure_float32(st_p1_te + ph_p1_te + sp_p1_te).replace(0.0, 1.0)
+    tot_p2_te = _ensure_float32(st_p2_te + ph_p2_te + sp_p2_te).replace(0.0, 1.0)
 
-# 2) spd_gap: P1 speed minus P2 speed
-_add_feature_pair(
-    train_df, test_df, "spd_gap",
-    (spd_p1 - spd_p2),
-    (spd_p1_te - spd_p2_te)
-)
+    status_share_p1 = _safe_div(st_p1, tot_p1)
+    status_share_p2 = _safe_div(st_p2, tot_p2)
+    status_share_p1_te = _safe_div(st_p1_te, tot_p1_te)
+    status_share_p2_te = _safe_div(st_p2_te, tot_p2_te)
 
-# 3) hp_ratio: P1 current HP vs P2 current HP
-_add_feature_pair(
-    train_df, test_df, "hp_ratio",
-    _safe_div(hp1_cur, hp2_cur),
-    _safe_div(hp1_cur_te, hp2_cur_te)
-)
+    _add_feature_pair(
+        train_df, test_df, "status_influence",
+        (status_share_p1 - status_share_p2),
+        (status_share_p1_te - status_share_p2_te)
+    )
 
-# 4) survival_score: (P1 HP%) - (P2 HP%)
-_add_feature_pair(
-    train_df, test_df, "survival_score",
-    _safe_div(hp1_cur, hp1_max) - _safe_div(hp2_cur, hp2_max),
-    _safe_div(hp1_cur_te, hp1_max_te) - _safe_div(hp2_cur_te, hp2_max_te)
-)
+    # 10) speed_ratio: P1 speed / P2 speed
+    _add_feature_pair(
+        train_df, test_df, "speed_ratio",
+        _safe_div(spd_p1, spd_p2),
+        _safe_div(spd_p1_te, spd_p2_te)
+    )
 
-# 5) momentum_index: (atk*spd)_P1 / (atk*spd)_P2
-_add_feature_pair(
-    train_df, test_df, "momentum_index",
-    _safe_div(atk_p1 * spd_p1, atk_p2 * spd_p2),
-    _safe_div(atk_p1_te * spd_p1_te, atk_p2_te * spd_p2_te)
-)
+    # --- Quick validation: no NaN/Inf and report how many were added ---
+    new_cols = [
+        "atk_def_ratio","spd_gap","hp_ratio","survival_score","momentum_index",
+        "power_acc_gap","offensive_balance","defensive_efficiency","status_influence","speed_ratio"
+    ]
+    bad_train = train_df[new_cols].isna().sum().sum() + np.isinf(train_df[new_cols].to_numpy()).sum()
+    bad_test  = test_df[new_cols].isna().sum().sum()  + np.isinf(test_df[new_cols].to_numpy()).sum()
+    print(f"[Model 3][FeatureEng] Added {len(new_cols)} engineered features. "
+          f"Bad values -> train: {bad_train}, test: {bad_test}")
 
-# 6) power_acc_gap: (avg power weighted by acc) P1 - P2
-pwa_p1 = _ensure_float32(pwr_p1 * acc_p1)
-pwa_p2 = _ensure_float32(pwr_p2 * acc_p2)
-pwa_p1_te = _ensure_float32(pwr_p1_te * acc_p1_te)
-pwa_p2_te = _ensure_float32(pwr_p2_te * acc_p2_te)
-_add_feature_pair(
-    train_df, test_df, "power_acc_gap",
-    (pwa_p1 - pwa_p2),
-    (pwa_p1_te - pwa_p2_te)
-)
+    print("\n[Model 3] Preview (raw):")
+    try:
+        display(train_df_raw.head())
+    except Exception:
+        pass
 
-# 7) offensive_balance: (atk + sp_atk) P1 / P2
-_add_feature_pair(
-    train_df, test_df, "offensive_balance",
-    _safe_div(atk_p1 + sp_atk_p1, atk_p2 + sp_atk_p2),
-    _safe_div(atk_p1_te + sp_atk_p1_te, atk_p2_te + sp_atk_p2_te)
-)
+    print("\n[Model 3] Prepared (unscaled, clean types):")
+    try:
+        display(train_df.head())
+    except Exception:
+        pass
 
-# 8) defensive_efficiency: (def + sp_def) P1 / P2
-_add_feature_pair(
-    train_df, test_df, "defensive_efficiency",
-    _safe_div(def_p1 + sp_def_p1, def_p2 + sp_def_p2),
-    _safe_div(def_p1_te + sp_def_p1_te, def_p2_te + sp_def_p2_te)
-)
-
-# 9) status_influence: share STATUS moves P1 - P2
-tot_p1 = _ensure_float32(st_p1 + ph_p1 + sp_p1).replace(0.0, 1.0)
-tot_p2 = _ensure_float32(st_p2 + ph_p2 + sp_p2).replace(0.0, 1.0)
-tot_p1_te = _ensure_float32(st_p1_te + ph_p1_te + sp_p1_te).replace(0.0, 1.0)
-tot_p2_te = _ensure_float32(st_p2_te + ph_p2_te + sp_p2_te).replace(0.0, 1.0)
-
-status_share_p1 = _safe_div(st_p1, tot_p1)
-status_share_p2 = _safe_div(st_p2, tot_p2)
-status_share_p1_te = _safe_div(st_p1_te, tot_p1_te)
-status_share_p2_te = _safe_div(st_p2_te, tot_p2_te)
-
-_add_feature_pair(
-    train_df, test_df, "status_influence",
-    (status_share_p1 - status_share_p2),
-    (status_share_p1_te - status_share_p2_te)
-)
-
-# 10) speed_ratio: P1 speed / P2 speed
-_add_feature_pair(
-    train_df, test_df, "speed_ratio",
-    _safe_div(spd_p1, spd_p2),
-    _safe_div(spd_p1_te, spd_p2_te)
-)
-
-# --- Quick validation: no NaN/Inf and report how many were added ---
-new_cols = [
-    "atk_def_ratio","spd_gap","hp_ratio","survival_score","momentum_index",
-    "power_acc_gap","offensive_balance","defensive_efficiency","status_influence","speed_ratio"
-]
-bad_train = train_df[new_cols].isna().sum().sum() + np.isinf(train_df[new_cols].to_numpy()).sum()
-bad_test  = test_df[new_cols].isna().sum().sum()  + np.isinf(test_df[new_cols].to_numpy()).sum()
-print(f"[FeatureEng] Added {len(new_cols)} engineered features. Bad values -> train: {bad_train}, test: {bad_test}")
-
-print("\nPreview (raw):")
-display(train_df_raw.head())
-
-print("\nPrepared (unscaled, clean types):")
-display(train_df.head())
+    print("\n[Model 3] Feature engineering completed.")
+    return train_df, test_df, train_df_raw, test_df_raw
 
 
 # ## 2.A Overfitting check
@@ -1600,18 +1394,79 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 
-def diagnose_overfitting(
-    X, y,
+# ==========================================
+# Overfitting diagnostics (learning curve)
+# ==========================================
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.model_selection import StratifiedKFold, learning_curve
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+
+
+def diagnose_overfitting_lr(
+    train_df: pd.DataFrame,
+    target_col: str = "player_won",
+    id_cols: list[str] | None = None,
     cv_splits: int = 5,
-    train_sizes = np.linspace(0.1, 1.0, 6),
+    train_sizes = None,
     random_state: int = 42,
     max_iter: int = 1000,
-    plot: bool = True
+    plot: bool = True,
 ):
     """
-    Computes a learning curve for a Logistic Regression pipeline (Scaler + Logistic).
-    Returns a dict with summary stats and optionally plots train vs validation accuracy.
+    Compute a learning curve for a Logistic Regression pipeline (Scaler + Logistic),
+    using the given training DataFrame.
+
+    Parameters
+    ----------
+    train_df : pd.DataFrame
+        Training data including the target column.
+    target_col : str, default "player_won"
+        Name of the binary target column.
+    id_cols : list[str] or None, default None
+        Columns to exclude from X (e.g. ["battle_id"]). If None, no extra id columns are dropped.
+    cv_splits : int, default 5
+        Number of CV folds for StratifiedKFold.
+    train_sizes : array-like or None, default None
+        Fractions of training set to use; if None, uses np.linspace(0.1, 1.0, 6).
+    random_state : int, default 42
+        Random seed for CV and LogisticRegression.
+    max_iter : int, default 1000
+        Max iterations for LogisticRegression.
+    plot : bool, default True
+        If True, plots the learning curve.
+
+    Returns
+    -------
+    results : dict
+        {
+            "train_sizes": np.ndarray,
+            "train_acc_mean": np.ndarray,
+            "val_acc_mean": np.ndarray,
+            "gap_last": float,
+            "val_last": float,
+            "overfitting_flag": bool,
+            "df_learning_curve": pd.DataFrame
+        }
     """
+    if train_sizes is None:
+        train_sizes = np.linspace(0.1, 1.0, 6)
+
+    if id_cols is None:
+        id_cols = []
+
+    if target_col not in train_df.columns:
+        raise ValueError(f"Target column '{target_col}' not found in train_df.")
+
+    # Build X, y
+    feature_cols = [c for c in train_df.columns if c not in ([target_col] + list(id_cols))]
+    X = train_df[feature_cols].values
+    y = train_df[target_col].astype(int).values
+
     pipe = Pipeline([
         ("scaler", StandardScaler()),
         ("clf", LogisticRegression(max_iter=max_iter, random_state=random_state))
@@ -1619,16 +1474,16 @@ def diagnose_overfitting(
 
     cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
 
-    # learning_curve supports shuffle/random_state in recent sklearn versions
     ts_abs, train_scores, val_scores = learning_curve(
         estimator=pipe,
-        X=X, y=y,
+        X=X,
+        y=y,
         train_sizes=train_sizes,
         cv=cv,
         scoring="accuracy",
         shuffle=True,
         random_state=random_state,
-        n_jobs=-1
+        n_jobs=-1,
     )
 
     train_mean = train_scores.mean(axis=1)
@@ -1636,34 +1491,36 @@ def diagnose_overfitting(
     val_mean   = val_scores.mean(axis=1)
     val_std    = val_scores.std(axis=1)
 
-    # Table view
     df_lc = pd.DataFrame({
         "train_size": ts_abs,
         "train_acc_mean": train_mean,
         "train_acc_std": train_std,
         "val_acc_mean": val_mean,
         "val_acc_std": val_std,
-        "gap_train_minus_val": train_mean - val_mean
+        "gap_train_minus_val": train_mean - val_mean,
     })
-    display(df_lc)
 
-    # Simple decision rule for potential overfitting (gap at largest size)
+    try:
+        display(df_lc)
+    except Exception:
+        pass
+
     gap_last = float(df_lc["gap_train_minus_val"].iloc[-1])
     val_last = float(df_lc["val_acc_mean"].iloc[-1])
     flag_overfit = (gap_last >= 0.05) and (val_last < 0.80 or gap_last > 0.07)
 
-    print(f"\nLargest train size = {int(ts_abs[-1])}")
+    print(f"\n[Overfitting] Largest train size = {int(ts_abs[-1])}")
     print(f"  • Train acc (mean): {train_mean[-1]:.4f}")
     print(f"  • Val   acc (mean): {val_mean[-1]:.4f}")
     print(f"  • Gap (train - val): {gap_last:.4f}")
-    print(f"\nPotential overfitting: {'YES' if flag_overfit else 'NO'}")
+    print(f"\n[Overfitting] Potential overfitting: {'YES' if flag_overfit else 'NO'}")
 
     if plot:
         plt.figure()
         plt.plot(ts_abs, train_mean, marker="o", label="Train acc")
-        plt.fill_between(ts_abs, train_mean-train_std, train_mean+train_std, alpha=0.15)
+        plt.fill_between(ts_abs, train_mean - train_std, train_mean + train_std, alpha=0.15)
         plt.plot(ts_abs, val_mean, marker="o", label="Validation acc")
-        plt.fill_between(ts_abs, val_mean-val_std, val_mean+val_std, alpha=0.15)
+        plt.fill_between(ts_abs, val_mean - val_std, val_mean + val_std, alpha=0.15)
         plt.xlabel("Number of training samples")
         plt.ylabel("Accuracy")
         plt.title("Learning curve — Logistic (scaled)")
@@ -1677,14 +1534,9 @@ def diagnose_overfitting(
         "val_acc_mean": val_mean,
         "gap_last": gap_last,
         "val_last": val_last,
-        "overfitting_flag": flag_overfit
+        "overfitting_flag": flag_overfit,
+        "df_learning_curve": df_lc,
     }
-
-# --- How to call (run after Cell 2) ---
-features = [c for c in train_df.columns if c not in ("battle_id", "player_won")]
-X = train_df[features].values
-y = train_df["player_won"].values
-_ = diagnose_overfitting(X, y, cv_splits=5, max_iter=1000, plot=True)
 
 
 # # 3. Models Training
@@ -1703,6 +1555,9 @@ _ = diagnose_overfitting(X, y, cv_splits=5, max_iter=1000, plot=True)
 # - Outputs: train_reduced, test_reduced with the exact selected feature subset
 # ================================================================================
 
+# ==========================================
+# Feature selection (Elastic Net + Top-N)
+# ==========================================
 import numpy as np
 import pandas as pd
 from typing import List, Tuple
@@ -1710,734 +1565,268 @@ from typing import List, Tuple
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import RobustScaler
 from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
-from sklearn.feature_selection import SelectFromModel
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import accuracy_score
 
-# -----------------------
-# Config
-# -----------------------
-RANDOM_STATE = 42
-ID_COLS      = ["battle_id"]
-TARGET_COL   = "player_won"
-DROP_VIF     = True           # set to False to skip VIF pruning
-VIF_THRESHOLD= 25.0           # robust, not too aggressive
-MAX_VIF_STEPS= 50             # safety cap
-CORR_THR     = 0.99           # correlation pruning threshold (abs Pearson)
-NEAR_CONST_P = 0.002        # near-constant if <1% distinct values
-CV_SPLITS    = 5
 
-assert TARGET_COL in train_df.columns, f"Target '{TARGET_COL}' not found in train_df."
-
-# -----------------------
-# 0) Build numeric matrices
-# -----------------------
-num_cols_all = [c for c in train_df.columns if c not in (TARGET_COL, *ID_COLS)]
-X = train_df[num_cols_all].copy()
-y = train_df[TARGET_COL].astype(int).copy()
-X_test_full = test_df[num_cols_all].copy()
-
-# ensure numeric dtype (and keep NaN)
-X = X.apply(pd.to_numeric, errors="coerce").astype("float32")
-X_test_full = X_test_full.apply(pd.to_numeric, errors="coerce").astype("float32")
-
-orig_feat_count = X.shape[1]
-print(f"[Info] Original feature count (numeric, pre-pruning): {orig_feat_count}")
-
-# -----------------------
-# Helper: simple impute/scale (fit on TRAIN only)
-# -----------------------
-def fit_imputer_scaler(df: pd.DataFrame):
-    imp = SimpleImputer(strategy="median")
-    sca = RobustScaler()
-    Z   = imp.fit_transform(df)
-    Z   = sca.fit_transform(Z)
-    return imp, sca, Z
-
-# -----------------------
-# (A) Constants 
-# -----------------------
-# constants: zero variance on observed values (ignoring NaN)
-const_cols = [c for c in X.columns if X[c].nunique(dropna=True) <= 1]
-
-print(f"[Pruning][A] Constant features removed: {len(const_cols)}")
-if const_cols:
-    print("  -> Constant list (first 50):", const_cols[:50])
-
-drop_A = const_cols
-if drop_A:
-    X.drop(columns=drop_A, inplace=True, errors="ignore")
-    X_test_full.drop(columns=drop_A, inplace=True, errors="ignore")
-
-print(f"[Pruning][A] After constant pruning: {X.shape[1]} features")
-
-# -----------------------
-# (B) Correlation pruning (|ρ| > CORR_THR)
-# -----------------------
-# compute correlation on imputed values to avoid NaNs
-imp_tmp = SimpleImputer(strategy="median").fit(X)
-X_imp = pd.DataFrame(imp_tmp.transform(X), columns=X.columns, index=X.index)
-
-corr = X_imp.corr(method="pearson").abs()
-upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
-to_drop_corr = [col for col in upper.columns if any(upper[col] > CORR_THR)]
-
-if to_drop_corr:
-    print(f"[Pruning][B] Dropped for high correlation (>|ρ| {CORR_THR}): {len(to_drop_corr)}")
-    X.drop(columns=to_drop_corr, inplace=True, errors="ignore")
-    X_test_full.drop(columns=to_drop_corr, inplace=True, errors="ignore")
-else:
-    print("[Pruning][B] No features dropped by correlation threshold.")
-
-print(f"[Pruning][B] After correlation pruning: {X.shape[1]} features")
-
-# -----------------------
-# (C) Optional robust VIF pruning (iterative)
-# -----------------------
-def compute_vif_frame(df_std: pd.DataFrame) -> pd.DataFrame:
+def run_feature_selection_mrk(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    target_col: str = "player_won",
+    id_cols: list[str] | None = None,
+    random_state: int = 42,
+    drop_vif: bool = True,
+    vif_threshold: float = 25.0,
+    max_vif_steps: int = 50,
+    corr_threshold: float = 0.99,
+    cv_splits: int = 5,
+    target_n_features: int = 60,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     """
-    Compute VIF using a standard OLS-based formula on standardized, imputed data.
-    Returns a DataFrame with columns ['feature','vif'].
+    Best feature selection for Mirko model:
+      - A: constant feature pruning
+      - B: correlation pruning |ρ| > corr_threshold
+      - C: optional iterative VIF pruning on standardized data
+      - Elastic Net (LogisticRegressionCV, saga) on pruned features
+      - Select Top-N features by absolute coefficient magnitude
+
+    Parameters
+    ----------
+    train_df : pd.DataFrame
+        Training features with target_col and id_cols.
+    test_df : pd.DataFrame
+        Test features with id_cols.
+    target_col : str, default "player_won"
+        Name of the target column.
+    id_cols : list[str] or None, default None
+        ID columns to keep but not use in training (e.g. ["battle_id"]).
+    random_state : int, default 42
+        Random seed.
+    drop_vif : bool, default True
+        If True, run VIF-based pruning.
+    vif_threshold : float, default 25.0
+        VIF threshold above which features are iteratively dropped.
+    max_vif_steps : int, default 50
+        Maximum number of VIF pruning iterations.
+    corr_threshold : float, default 0.99
+        Absolute Pearson correlation threshold for pruning.
+    cv_splits : int, default 5
+        Number of CV folds for logistic Elastic Net.
+    target_n_features : int, default 60
+        Desired number of features to keep (Top-N by abs coefficient).
+
+    Returns
+    -------
+    train_reduced : pd.DataFrame
+        DataFrame with [id_cols] + [target_col] + selected features.
+    test_reduced : pd.DataFrame
+        DataFrame with [id_cols] + selected features.
+    selected_cols : list[str]
+        Names of selected feature columns (in train_reduced/test_reduced).
     """
-    # classic VIF formula via linear regressions:
-    # to avoid heavy statsmodels dependency & to keep it robust/fast, we use sklearn OLS fallback
-    from sklearn.linear_model import LinearRegression
-    cols = list(df_std.columns)
-    vifs = []
-    for i, col in enumerate(cols):
-        yv = df_std[col].values
-        Xv = df_std.drop(columns=[col]).values
-        # handle degenerate case: one or zero columns left
-        if Xv.shape[1] == 0:
-            vifs.append(np.inf)
-            continue
-        # fit OLS
-        lr = LinearRegression(n_jobs=None)  # OLS via least squares
-        lr.fit(Xv, yv)
-        yhat = lr.predict(Xv)
-        # R^2
-        ss_res = np.sum((yv - yhat)**2)
-        ss_tot = np.sum((yv - np.mean(yv))**2) + 1e-12
-        r2 = 1.0 - ss_res / ss_tot
-        # VIF
-        if r2 >= 0.999999:
-            vif_val = np.inf
-        else:
-            vif_val = 1.0 / max(1e-12, (1.0 - r2))
-        vifs.append(vif_val)
-    return pd.DataFrame({"feature": cols, "vif": vifs})
+    if id_cols is None:
+        id_cols = ["battle_id"]
 
-vif_dropped = []
-if DROP_VIF and X.shape[1] > 2:
-    print(f"[Pruning][C] Starting VIF pruning (thr={VIF_THRESHOLD}, max steps={MAX_VIF_STEPS}) ...")
-    step = 0
-    while step < MAX_VIF_STEPS and X.shape[1] > 2:
-        # refit imputer & scaler on current columns each iteration (avoids feature-name mismatch)
-        imp_vif, sca_vif, X_std = fit_imputer_scaler(X)
-        X_std = pd.DataFrame(X_std, columns=X.columns, index=X.index)
+    if target_col not in train_df.columns:
+        raise ValueError(f"Target column '{target_col}' not found in train_df.")
 
-        vif_frame = compute_vif_frame(X_std)
-        max_row = vif_frame.loc[vif_frame["vif"].idxmax()]
-        max_feat, max_vif = str(max_row["feature"]), float(max_row["vif"])
+    # 0) Build numeric matrices
+    num_cols_all = [c for c in train_df.columns if c not in ([target_col] + list(id_cols))]
+    X = train_df[num_cols_all].copy()
+    y = train_df[target_col].astype(int).copy()
+    X_test_full = test_df[num_cols_all].copy()
 
-        if not np.isfinite(max_vif):
-            # drop the one producing inf VIF
-            print(f"  [VIF] Step {step+1}: dropping '{max_feat}' (VIF=inf)")
+    X = X.apply(pd.to_numeric, errors="coerce").astype("float32")
+    X_test_full = X_test_full.apply(pd.to_numeric, errors="coerce").astype("float32")
+
+    orig_feat_count = X.shape[1]
+    print(f"[FS-M3] Original feature count (numeric, pre-pruning): {orig_feat_count}")
+
+    # Helper: imputer + scaler (fit on TRAIN only)
+    def fit_imputer_scaler(df: pd.DataFrame):
+        imp = SimpleImputer(strategy="median")
+        sca = RobustScaler()
+        Z = imp.fit_transform(df)
+        Z = sca.fit_transform(Z)
+        return imp, sca, Z
+
+    # (A) Constant features
+    const_cols = [c for c in X.columns if X[c].nunique(dropna=True) <= 1]
+    print(f"[FS-M3][A] Constant features removed: {len(const_cols)}")
+    if const_cols:
+        print("  -> Constant list (first 50):", const_cols[:50])
+
+    if const_cols:
+        X.drop(columns=const_cols, inplace=True, errors="ignore")
+        X_test_full.drop(columns=const_cols, inplace=True, errors="ignore")
+    print(f"[FS-M3][A] After constant pruning: {X.shape[1]} features")
+
+    # (B) Correlation pruning
+    imp_tmp = SimpleImputer(strategy="median").fit(X)
+    X_imp = pd.DataFrame(imp_tmp.transform(X), columns=X.columns, index=X.index)
+
+    corr = X_imp.corr(method="pearson").abs()
+    upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+    to_drop_corr = [col for col in upper.columns if any(upper[col] > corr_threshold)]
+
+    if to_drop_corr:
+        print(f"[FS-M3][B] Dropped for high correlation (>|ρ| {corr_threshold}): {len(to_drop_corr)}")
+        X.drop(columns=to_drop_corr, inplace=True, errors="ignore")
+        X_test_full.drop(columns=to_drop_corr, inplace=True, errors="ignore")
+    else:
+        print("[FS-M3][B] No features dropped by correlation threshold.")
+
+    print(f"[FS-M3][B] After correlation pruning: {X.shape[1]} features")
+
+    # (C) Optional VIF pruning
+    def compute_vif_frame(df_std: pd.DataFrame) -> pd.DataFrame:
+        """
+        Compute VIF using simple linear regressions on standardized data.
+        Returns a DataFrame with columns ['feature', 'vif'].
+        """
+        from sklearn.linear_model import LinearRegression
+
+        cols = list(df_std.columns)
+        vifs = []
+        for i, col in enumerate(cols):
+            yv = df_std[col].values
+            Xv = df_std.drop(columns=[col]).values
+
+            if Xv.shape[1] == 0:
+                vifs.append(np.inf)
+                continue
+
+            lr = LinearRegression(n_jobs=None)
+            lr.fit(Xv, yv)
+            yhat = lr.predict(Xv)
+
+            ss_res = np.sum((yv - yhat) ** 2)
+            ss_tot = np.sum((yv - np.mean(yv)) ** 2) + 1e-12
+            r2 = 1.0 - ss_res / ss_tot
+
+            if r2 >= 0.999999:
+                vif_val = np.inf
+            else:
+                vif_val = 1.0 / max(1e-12, (1.0 - r2))
+            vifs.append(vif_val)
+
+        return pd.DataFrame({"feature": cols, "vif": vifs})
+
+    vif_dropped = []
+    if drop_vif and X.shape[1] > 2:
+        print(f"[FS-M3][C] Starting VIF pruning (thr={vif_threshold}, max steps={max_vif_steps}) ...")
+        step = 0
+        while step < max_vif_steps and X.shape[1] > 2:
+            imp_vif, sca_vif, X_std = fit_imputer_scaler(X)
+            X_std = pd.DataFrame(X_std, columns=X.columns, index=X.index)
+
+            vif_frame = compute_vif_frame(X_std)
+            max_row = vif_frame.loc[vif_frame["vif"].idxmax()]
+            max_feat, max_vif = str(max_row["feature"]), float(max_row["vif"])
+
+            if not np.isfinite(max_vif):
+                print(f"  [FS-M3][VIF] Step {step+1}: dropping '{max_feat}' (VIF=inf)")
+                vif_dropped.append(max_feat)
+                X.drop(columns=[max_feat], inplace=True, errors="ignore")
+                X_test_full.drop(columns=[max_feat], inplace=True, errors="ignore")
+                step += 1
+                continue
+
+            if max_vif <= vif_threshold:
+                print(f"  [FS-M3][VIF] All VIF <= {vif_threshold:.1f} (max={max_vif:.2f}). Stopping.")
+                break
+
+            print(f"  [FS-M3][VIF] Step {step+1}: dropping '{max_feat}' (VIF={max_vif:.2f})")
             vif_dropped.append(max_feat)
             X.drop(columns=[max_feat], inplace=True, errors="ignore")
             X_test_full.drop(columns=[max_feat], inplace=True, errors="ignore")
             step += 1
-            continue
 
-        if max_vif <= VIF_THRESHOLD:
-            print(f"  [VIF] All VIF <= {VIF_THRESHOLD:.1f} (max={max_vif:.2f}). Stopping.")
-            break
+        print(f"[FS-M3][C] VIF dropped: {len(vif_dropped)}")
+    else:
+        print("[FS-M3][C] VIF pruning skipped or not applicable.")
 
-        print(f"  [VIF] Step {step+1}: dropping '{max_feat}' (VIF={max_vif:.2f})")
-        vif_dropped.append(max_feat)
-        X.drop(columns=[max_feat], inplace=True, errors="ignore")
-        X_test_full.drop(columns=[max_feat], inplace=True, errors="ignore")
-        step += 1
+    print(f"[FS-M3] After A+B(+C): {X.shape[1]} features")
 
-    print(f"[Pruning][C] VIF dropped: {len(vif_dropped)}")
-else:
-    print("[Pruning][C] VIF pruning skipped.")
+    feat_cols_after_pruning = list(X.columns)
 
-print(f"[Pruning] After A+B(+C): {X.shape[1]} features")
+    # Elastic Net selector (LogisticRegressionCV, saga)
+    cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
 
-feat_cols_after_pruning = list(X.columns)
+    imp_sel, sca_sel, X_std_sel = fit_imputer_scaler(X)
 
-# -----------------------
-# Elastic Net selector (LogisticRegressionCV, saga)
-# -----------------------
-cv = StratifiedKFold(n_splits=CV_SPLITS, shuffle=True, random_state=RANDOM_STATE)
-
-# Fit imputer & scaler on TRAIN (post-pruning)
-imp_sel, sca_sel, X_std_sel = fit_imputer_scaler(X)
-
-# ENet with CV on Cs and l1 ratios
-enet = LogisticRegressionCV(
-    penalty="elasticnet",
-    solver="saga",
-    Cs=[0.05, 0.1, 0.2, 0.5, 1.0],
-    l1_ratios=[0.1, 0.3, 0.5, 0.7],
-    scoring="accuracy",
-    cv=cv,
-    max_iter=5000,
-    tol=1e-3,
-    n_jobs=-1,
-    refit=True,
-    random_state=RANDOM_STATE
-)
-enet.fit(X_std_sel, y)
-
-# --- Top-N selection by absolute EN coefficients (replaces SelectFromModel sweep) ---
-TARGET_N_FEATURES = 60  # <- set your desired count
-
-# 1) Get absolute coefficients from the fitted CV ElasticNet (binary -> shape (1, n_features))
-abs_w = np.abs(enet.coef_.ravel())
-
-# 2) If too few non-zeros, gently relax by re-fitting once with larger C or lower l1_ratio
-nonzero_idx = np.where(abs_w > 0)[0]
-if nonzero_idx.size < TARGET_N_FEATURES:
-    # pick relaxed hyperparams from the best CV solution
-    relaxed_C = float(enet.C_[0] * 2.0)
-    relaxed_l1 = max(0.2, float(enet.l1_ratio_[0]) - 0.1)
-
-    enet_relaxed = LogisticRegressionCV(
+    enet = LogisticRegressionCV(
         penalty="elasticnet",
         solver="saga",
-        Cs=[relaxed_C],
-        l1_ratios=[relaxed_l1],
+        Cs=[0.05, 0.1, 0.2, 0.5, 1.0],
+        l1_ratios=[0.1, 0.3, 0.5, 0.7],
         scoring="accuracy",
         cv=cv,
-        max_iter=6000,
+        max_iter=5000,
         tol=1e-3,
         n_jobs=-1,
         refit=True,
-        random_state=RANDOM_STATE
+        random_state=random_state,
     )
-    enet_relaxed.fit(X_std_sel, y)
-    enet = enet_relaxed
+    enet.fit(X_std_sel, y)
+
+    # Coefficients
     abs_w = np.abs(enet.coef_.ravel())
     nonzero_idx = np.where(abs_w > 0)[0]
 
-# 3) Pick TOP-N by absolute weight (guarantees desired count when possible)
-n_take = min(TARGET_N_FEATURES, abs_w.size)
-thresh_val = np.partition(abs_w, -n_take)[-n_take]
-top_mask = abs_w >= thresh_val
+    if nonzero_idx.size < target_n_features:
+        relaxed_C = float(enet.C_[0] * 2.0)
+        relaxed_l1 = max(0.2, float(enet.l1_ratio_[0]) - 0.1)
 
-selected_cols = list(np.array(feat_cols_after_pruning)[top_mask])
-print(f"[ElasticNet+TopN] Non-zero weights: {nonzero_idx.size} | Selected top-{n_take}: {len(selected_cols)}")
+        print(f"[FS-M3] Relaxing ElasticNet: C={relaxed_C:.4f}, l1_ratio={relaxed_l1:.2f}")
+        enet_relaxed = LogisticRegressionCV(
+            penalty="elasticnet",
+            solver="saga",
+            Cs=[relaxed_C],
+            l1_ratios=[relaxed_l1],
+            scoring="accuracy",
+            cv=cv,
+            max_iter=6000,
+            tol=1e-3,
+            n_jobs=-1,
+            refit=True,
+            random_state=random_state,
+        )
+        enet_relaxed.fit(X_std_sel, y)
+        enet = enet_relaxed
+        abs_w = np.abs(enet.coef_.ravel())
+        nonzero_idx = np.where(abs_w > 0)[0]
 
-# 4) Build reduced DataFrames (RAW view for downstream cells)
-train_reduced = pd.concat(
-    [train_df[ID_COLS], train_df[[TARGET_COL]], train_df[selected_cols]],
-    axis=1
-)
-test_reduced = pd.concat(
-    [test_df[ID_COLS], test_df[selected_cols]],
-    axis=1
-)
+    n_take = min(target_n_features, abs_w.size)
+    thresh_val = np.partition(abs_w, -n_take)[-n_take]
+    top_mask = abs_w >= thresh_val
 
-print(f"[Output] train_reduced shape: {train_reduced.shape} | test_reduced shape: {test_reduced.shape}")
-print(f"[Features] Final selected ({len(selected_cols)}): first 25 -> {selected_cols[:25]}")
+    selected_cols = list(np.array(feat_cols_after_pruning)[top_mask])
+    print(f"[FS-M3][ElasticNet+TopN] Non-zero weights: {nonzero_idx.size} | "
+          f"Selected top-{n_take}: {len(selected_cols)}")
 
+    # Build reduced DataFrames
+    train_reduced = pd.concat(
+        [train_df[id_cols], train_df[[target_col]], train_df[selected_cols]],
+        axis=1,
+    )
+    test_reduced = pd.concat(
+        [test_df[id_cols], test_df[selected_cols]],
+        axis=1,
+    )
 
-# ## 3.2 - Stacking (Logistic Regression + XGBoost + Random Forest -> Logistic Regression meta)
+    print(f"[FS-M3][Output] train_reduced shape: {train_reduced.shape} | "
+          f"test_reduced shape: {test_reduced.shape}")
+    print(f"[FS-M3][Features] Final selected ({len(selected_cols)}). First 25 -> {selected_cols[:25]}")
 
-# In[5]:
+    return train_reduced, test_reduced, selected_cols
 
-
-# === 3.2 Stacking (LogisticRegression + XGBoost + RandomForest -> LogisticRegression meta) ===
-# # - Uses true OOF stacking: base learners trained per fold, produce OOF probs
-# # - XGBoost with early stopping (per-fold)
-# # - RF and XGB calibrated with sigmoid on the validation fold (no leakage)
-# # - Meta-learner = LogisticRegression (stable, well-calibrated on probs)
-# # - Exposes: oof_meta_scores, meta_test_scores, y
-
-# import numpy as np
-# from sklearn.model_selection import StratifiedKFold
-# from sklearn.pipeline import make_pipeline
-# from sklearn.preprocessing import StandardScaler
-# from sklearn.linear_model import LogisticRegression
-# from sklearn.metrics import accuracy_score, roc_auc_score
-# from sklearn.ensemble import RandomForestClassifier
-# from sklearn.calibration import CalibratedClassifierCV
-
-# import xgboost as xgb
-
-# RANDOM_STATE = 99
-# FOLDS = 10
-# np.random.seed(RANDOM_STATE)
-
-# # --- Safety checks & matrices ---
-# assert "selected_cols" in globals(), "Run Cell 3.1 to define 'selected_cols'."
-# assert "train_reduced" in globals() and "test_reduced" in globals(), "Missing reduced frames from 3.1."
-
-# X_sel = train_reduced[selected_cols].to_numpy()
-# X_test_sel = test_reduced[selected_cols].to_numpy()
-# y = train_reduced["player_won"].astype(int).to_numpy()
-
-# n_train = X_sel.shape[0]
-# n_test  = X_test_sel.shape[0]
-
-# print(f"[Stack LR+XGB+RF→LR] Using {X_sel.shape[1]} selected features on {n_train} training rows.")
-
-# # --- Base learners -------------------------------------------------------------------------
-# # (1) Logistic Regression (scaled). No calibration needed.
-# base_lr = make_pipeline(
-#     StandardScaler(),
-#     LogisticRegression(
-#         solver="liblinear",
-#         penalty="l2",
-#         C=0.5,
-#         max_iter=3000,
-#         random_state=RANDOM_STATE
-#     )
-# )
-
-# # (2) XGBoost (with early stopping). We'll calibrate per-fold on the val fold.
-# base_xgb_params = dict(
-#     n_estimators=2000,           # high cap, early stopping will cut it
-#     learning_rate=0.03,
-#     max_depth=6,
-#     subsample=0.8,
-#     colsample_bytree=0.8,
-#     reg_lambda=1.0,
-#     reg_alpha=0.0,
-#     objective="binary:logistic",
-#     eval_metric="logloss",
-#     random_state=RANDOM_STATE,
-#     n_jobs=-1,
-#     tree_method="hist"
-# )
-
-# # (3) Random Forest (regularized) + per-fold calibration
-# base_rf = RandomForestClassifier(
-#     n_estimators=400,
-#     max_depth=10,
-#     min_samples_leaf=10,
-#     max_features="sqrt",
-#     bootstrap=True,
-#     n_jobs=-1,
-#     random_state=RANDOM_STATE
-# )
-
-# base_names  = ["lr", "xgb", "rf"]
-# n_base      = len(base_names)
-
-# # --- OOF holders for base learners (level-1 features) --------------------------------------
-# oof_base = np.zeros((n_train, n_base), dtype=float)
-# test_base_folds = np.zeros((n_test, n_base, FOLDS), dtype=float)
-
-# skf = StratifiedKFold(n_splits=FOLDS, shuffle=True, random_state=RANDOM_STATE)
-
-# print("\n[Per-fold validation summary]")
-# for fold, (tr_idx, va_idx) in enumerate(skf.split(X_sel, y), 1):
-#     X_tr, X_va = X_sel[tr_idx], X_sel[va_idx]
-#     y_tr, y_va = y[tr_idx], y[va_idx]
-
-#     # ---- Base 1: Logistic Regression (no calibration) ----
-#     lr_model = make_pipeline(
-#         StandardScaler(),
-#         LogisticRegression(
-#             solver="liblinear",
-#             penalty="l2",
-#             C=0.5,
-#             max_iter=3000,
-#             random_state=RANDOM_STATE
-#         )
-#     )
-#     lr_model.fit(X_tr, y_tr)
-#     lr_va = lr_model.predict_proba(X_va)[:, 1]
-#     lr_te = lr_model.predict_proba(X_test_sel)[:, 1]
-
-#     # ---- Base 2: XGBoost (early stopping) + sigmoid calibration on val ----
-#     xgb_model = xgb.XGBClassifier(**base_xgb_params)
-#     xgb_model.fit(
-#         X_tr, y_tr,
-#         eval_set=[(X_va, y_va)],
-#         verbose=False
-#     )
-
-#     # predictions at best iteration (handle API differences safely)
-#     try:
-#         best_it = getattr(xgb_model, "best_iteration", None)
-#         if best_it is not None:
-#             xgb_va_raw = xgb_model.predict_proba(X_va, iteration_range=(0, best_it + 1))[:, 1]
-#             xgb_te_raw = xgb_model.predict_proba(X_test_sel, iteration_range=(0, best_it + 1))[:, 1]
-#         else:
-#             xgb_va_raw = xgb_model.predict_proba(X_va)[:, 1]
-#             xgb_te_raw = xgb_model.predict_proba(X_test_sel)[:, 1]
-#         used_best = best_it
-#     except Exception:
-#         xgb_va_raw = xgb_model.predict_proba(X_va)[:, 1]
-#         xgb_te_raw = xgb_model.predict_proba(X_test_sel)[:, 1]
-#         used_best = "N/A"
-
-#     # calibrate on the validation fold (no leakage)
-#     xgb_cal = CalibratedClassifierCV(estimator=xgb_model, method="sigmoid", cv="prefit")
-#     xgb_cal.fit(X_va, y_va)
-#     xgb_va = xgb_cal.predict_proba(X_va)[:, 1]
-#     xgb_te = xgb_cal.predict_proba(X_test_sel)[:, 1]
-
-#     # ---- Base 3: Random Forest + sigmoid calibration on val ----
-#     rf_model = RandomForestClassifier(
-#         n_estimators=400,
-#         max_depth=10,
-#         min_samples_leaf=10,
-#         max_features="sqrt",
-#         bootstrap=True,
-#         n_jobs=-1,
-#         random_state=RANDOM_STATE + fold  # slight variation per fold
-#     )
-#     rf_model.fit(X_tr, y_tr)
-#     rf_cal = CalibratedClassifierCV(estimator=rf_model, method="sigmoid", cv="prefit")
-#     rf_cal.fit(X_va, y_va)
-#     rf_va = rf_cal.predict_proba(X_va)[:, 1]
-#     rf_te = rf_cal.predict_proba(X_test_sel)[:, 1]
-
-#     # ---- Store OOF & per-fold test probs (level-1 design) ----
-#     oof_base[va_idx, 0] = lr_va
-#     oof_base[va_idx, 1] = xgb_va
-#     oof_base[va_idx, 2] = rf_va
-
-#     test_base_folds[:, 0, fold - 1] = lr_te
-#     test_base_folds[:, 1, fold - 1] = xgb_te
-#     test_base_folds[:, 2, fold - 1] = rf_te
-
-#     # ---- Fold metrics (on validation) ----
-#     # Report each base quickly (accuracy/AUC at 0.50)
-#     def _rep(name, p):
-#         acc = accuracy_score(y_va, (p >= 0.5).astype(int))
-#         try:
-#             auc = roc_auc_score(y_va, p)
-#         except Exception:
-#             auc = np.nan
-#         return acc, auc
-
-#     acc_lr, auc_lr   = _rep("lr",  lr_va)
-#     acc_xgb, auc_xgb = _rep("xgb", xgb_va)
-#     acc_rf, auc_rf   = _rep("rf",  rf_va)
-
-#     print(f"  [Fold {fold}] "
-#           f"LR  acc={acc_lr:.4f} | AUC={auc_lr:.4f}  ||  "
-#           f"XGB acc={acc_xgb:.4f} | AUC={auc_xgb:.4f} | best_iter={used_best}  ||  "
-#           f"RF  acc={acc_rf:.4f} | AUC={auc_rf:.4f}")
-
-# # --- Aggregate test probs across folds for each base learner ---
-# test_base_mean = test_base_folds.mean(axis=2)   # shape: (n_test, 3)
-
-# # --- Meta-learner on OOF base features (with second-level OOF for honest estimate) ----------
-# meta_clf = LogisticRegression(
-#     solver="lbfgs",
-#     penalty="l2",
-#     C=1.0,
-#     max_iter=5000,
-#     random_state=RANDOM_STATE
-# )
-
-# # Build true OOF for meta as well
-# oof_meta_scores = np.zeros(n_train, dtype=float)
-# meta_test_folds = np.zeros((n_test, FOLDS), dtype=float)
-
-# skf_meta = StratifiedKFold(n_splits=FOLDS, shuffle=True, random_state=RANDOM_STATE + 1)
-# for fold, (tr_idx, va_idx) in enumerate(skf_meta.split(oof_base, y), 1):
-#     X_tr_m, X_va_m = oof_base[tr_idx], oof_base[va_idx]
-#     y_tr_m, y_va_m = y[tr_idx], y[va_idx]
-
-#     meta_clf_fold = LogisticRegression(
-#         solver="lbfgs",
-#         penalty="l2",
-#         C=1.0,
-#         max_iter=5000,
-#         random_state=RANDOM_STATE + fold
-#     )
-#     meta_clf_fold.fit(X_tr_m, y_tr_m)
-#     oof_meta_scores[va_idx] = meta_clf_fold.predict_proba(X_va_m)[:, 1]
-#     meta_test_folds[:, fold - 1] = meta_clf_fold.predict_proba(test_base_mean)[:, 1]
-
-# # Final meta on full OOF (optional fit, used for reporting and stability)
-# meta_clf.fit(oof_base, y)
-# meta_test_scores = meta_test_folds.mean(axis=1)
-
-# # --- Quick OOF report for the stacked meta predictor ---
-# oof_acc_default = accuracy_score(y, (oof_meta_scores >= 0.50).astype(int))
-# try:
-#     oof_auc = roc_auc_score(y, oof_meta_scores)
-# except Exception:
-#     oof_auc = np.nan
-
-# print("\n[OOF][Meta LR] Accuracy @ 0.50 = {:.4f}".format(oof_acc_default))
-# print("[OOF][Meta LR] ROC-AUC = {:.4f}".format(oof_auc))
-# print("\nReady for 3.3 threshold tuning (variables: oof_meta_scores, meta_test_scores, y)")
-
-
-# In[6]:
-
-
-# import numpy as np
-# from sklearn.model_selection import StratifiedKFold
-# from sklearn.pipeline import make_pipeline
-# from sklearn.preprocessing import StandardScaler
-# from sklearn.linear_model import LogisticRegression
-# from sklearn.metrics import accuracy_score, roc_auc_score
-# from sklearn.ensemble import RandomForestClassifier
-# from sklearn.calibration import CalibratedClassifierCV
-
-# import xgboost as xgb
-
-# # ===============================================================
-# # MULTI-SEED ENSEMBLE WRAPPER
-# # ===============================================================
-
-# SEEDS = [11, 42, 77, 99, 123]
-# results = []
-
-# for seed in SEEDS:
-#     print("\n" + "="*80)
-#     print(f"Running stacking with RANDOM_STATE = {seed}")
-#     print("="*80)
-
-#     # global random seed
-#     RANDOM_STATE = seed
-#     np.random.seed(RANDOM_STATE)
-#     META_RANDOM_STATE = 42
-#     np.random.seed(META_RANDOM_STATE)
-#     FOLDS = 10
-
-#     # orginal block stars from here <------
-#     assert "selected_cols" in globals(), "Run Cell 3.1 to define 'selected_cols'."
-#     assert "train_reduced" in globals() and "test_reduced" in globals(), "Missing reduced frames from 3.1."
-    
-#     X_sel = train_reduced[selected_cols].to_numpy()
-#     X_test_sel = test_reduced[selected_cols].to_numpy()
-#     y = train_reduced["player_won"].astype(int).to_numpy()
-    
-#     n_train = X_sel.shape[0]
-#     n_test  = X_test_sel.shape[0]
-    
-#     print(f"[Stack LR+XGB+RF→LR] Using {X_sel.shape[1]} selected features on {n_train} training rows.")
-    
-#     # --- Base learners -------------------------------------------------------------------------
-#     # (1) Logistic Regression (scaled). No calibration needed.
-#     base_lr = make_pipeline(
-#         StandardScaler(),
-#         LogisticRegression(
-#             solver="liblinear",
-#             penalty="l2",
-#             C=0.5,
-#             max_iter=3000,
-#             random_state=RANDOM_STATE
-#         )
-#     )
-    
-#     # (2) XGBoost (with early stopping). We'll calibrate per-fold on the val fold.
-#     base_xgb_params = dict(
-#         n_estimators=2000,           # high cap, early stopping will cut it
-#         learning_rate=0.03,
-#         max_depth=6,
-#         subsample=0.8,
-#         colsample_bytree=0.8,
-#         reg_lambda=1.0,
-#         reg_alpha=0.0,
-#         objective="binary:logistic",
-#         eval_metric="logloss",
-#         random_state=RANDOM_STATE,
-#         n_jobs=-1,
-#         tree_method="hist"
-#     )
-    
-#     # (3) Random Forest (regularized) + per-fold calibration
-#     base_rf = RandomForestClassifier(
-#         n_estimators=400,
-#         max_depth=10,
-#         min_samples_leaf=10,
-#         max_features="sqrt",
-#         bootstrap=True,
-#         n_jobs=-1,
-#         random_state=RANDOM_STATE
-#     )
-    
-#     base_names  = ["lr", "xgb", "rf"]
-#     n_base      = len(base_names)
-    
-#     # --- OOF holders for base learners (level-1 features) --------------------------------------
-#     oof_base = np.zeros((n_train, n_base), dtype=float)
-#     test_base_folds = np.zeros((n_test, n_base, FOLDS), dtype=float)
-    
-#     skf = StratifiedKFold(n_splits=FOLDS, shuffle=True, random_state=RANDOM_STATE)
-    
-#     print("\n[Per-fold validation summary]")
-#     for fold, (tr_idx, va_idx) in enumerate(skf.split(X_sel, y), 1):
-#         X_tr, X_va = X_sel[tr_idx], X_sel[va_idx]
-#         y_tr, y_va = y[tr_idx], y[va_idx]
-    
-#         # ---- Base 1: Logistic Regression (no calibration) ----
-#         lr_model = make_pipeline(
-#             StandardScaler(),
-#             LogisticRegression(
-#                 solver="liblinear",
-#                 penalty="l2",
-#                 C=0.5,
-#                 max_iter=3000,
-#                 random_state=RANDOM_STATE
-#             )
-#         )
-#         lr_model.fit(X_tr, y_tr)
-#         lr_va = lr_model.predict_proba(X_va)[:, 1]
-#         lr_te = lr_model.predict_proba(X_test_sel)[:, 1]
-    
-#         # ---- Base 2: XGBoost (early stopping) + sigmoid calibration on val ----
-#         xgb_model = xgb.XGBClassifier(**base_xgb_params)
-#         xgb_model.fit(
-#             X_tr, y_tr,
-#             eval_set=[(X_va, y_va)],
-#             verbose=False
-#         )
-    
-#         # predictions at best iteration (handle API differences safely)
-#         try:
-#             best_it = getattr(xgb_model, "best_iteration", None)
-#             if best_it is not None:
-#                 xgb_va_raw = xgb_model.predict_proba(X_va, iteration_range=(0, best_it + 1))[:, 1]
-#                 xgb_te_raw = xgb_model.predict_proba(X_test_sel, iteration_range=(0, best_it + 1))[:, 1]
-#             else:
-#                 xgb_va_raw = xgb_model.predict_proba(X_va)[:, 1]
-#                 xgb_te_raw = xgb_model.predict_proba(X_test_sel)[:, 1]
-#             used_best = best_it
-#         except Exception:
-#             xgb_va_raw = xgb_model.predict_proba(X_va)[:, 1]
-#             xgb_te_raw = xgb_model.predict_proba(X_test_sel)[:, 1]
-#             used_best = "N/A"
-    
-#         # calibrate on the validation fold (no leakage)
-#         xgb_cal = CalibratedClassifierCV(estimator=xgb_model, method="sigmoid", cv="prefit")
-#         xgb_cal.fit(X_va, y_va)
-#         xgb_va = xgb_cal.predict_proba(X_va)[:, 1]
-#         xgb_te = xgb_cal.predict_proba(X_test_sel)[:, 1]
-    
-#         # ---- Base 3: Random Forest + sigmoid calibration on val ----
-#         rf_model = RandomForestClassifier(
-#             n_estimators=400,
-#             max_depth=10,
-#             min_samples_leaf=10,
-#             max_features="sqrt",
-#             bootstrap=True,
-#             n_jobs=-1,
-#             random_state=RANDOM_STATE + fold  # slight variation per fold
-#         )
-#         rf_model.fit(X_tr, y_tr)
-#         rf_cal = CalibratedClassifierCV(estimator=rf_model, method="sigmoid", cv="prefit")
-#         rf_cal.fit(X_va, y_va)
-#         rf_va = rf_cal.predict_proba(X_va)[:, 1]
-#         rf_te = rf_cal.predict_proba(X_test_sel)[:, 1]
-    
-#         # ---- Store OOF & per-fold test probs (level-1 design) ----
-#         oof_base[va_idx, 0] = lr_va
-#         oof_base[va_idx, 1] = xgb_va
-#         oof_base[va_idx, 2] = rf_va
-    
-#         test_base_folds[:, 0, fold - 1] = lr_te
-#         test_base_folds[:, 1, fold - 1] = xgb_te
-#         test_base_folds[:, 2, fold - 1] = rf_te
-    
-#         # ---- Fold metrics (on validation) ----
-#         # Report each base quickly (accuracy/AUC at 0.50)
-#         def _rep(name, p):
-#             acc = accuracy_score(y_va, (p >= 0.5).astype(int))
-#             try:
-#                 auc = roc_auc_score(y_va, p)
-#             except Exception:
-#                 auc = np.nan
-#             return acc, auc
-    
-#         acc_lr, auc_lr   = _rep("lr",  lr_va)
-#         acc_xgb, auc_xgb = _rep("xgb", xgb_va)
-#         acc_rf, auc_rf   = _rep("rf",  rf_va)
-    
-#         print(f"  [Fold {fold}] "
-#               f"LR  acc={acc_lr:.4f} | AUC={auc_lr:.4f}  ||  "
-#               f"XGB acc={acc_xgb:.4f} | AUC={auc_xgb:.4f} | best_iter={used_best}  ||  "
-#               f"RF  acc={acc_rf:.4f} | AUC={auc_rf:.4f}")
-    
-#     # --- Aggregate test probs across folds for each base learner ---
-#     test_base_mean = test_base_folds.mean(axis=2)   # shape: (n_test, 3)
-    
-#     # --- Meta-learner on OOF base features (with second-level OOF for honest estimate) ----------
-#     meta_clf = LogisticRegression(
-#         solver="lbfgs",
-#         penalty="l2",
-#         C=1.0,
-#         max_iter=5000,
-#         random_state=META_RANDOM_STATE
-#     )
-    
-#     # Build true OOF for meta as well
-#     oof_meta_scores = np.zeros(n_train, dtype=float)
-#     meta_test_folds = np.zeros((n_test, FOLDS), dtype=float)
-    
-#     skf_meta = StratifiedKFold(n_splits=FOLDS, shuffle=True, random_state=META_RANDOM_STATE + 1)
-#     for fold, (tr_idx, va_idx) in enumerate(skf_meta.split(oof_base, y), 1):
-#         X_tr_m, X_va_m = oof_base[tr_idx], oof_base[va_idx]
-#         y_tr_m, y_va_m = y[tr_idx], y[va_idx]
-    
-#         meta_clf_fold = LogisticRegression(
-#             solver="lbfgs",
-#             penalty="l2",
-#             C=1.0,
-#             max_iter=5000,
-#             random_state=META_RANDOM_STATE + fold
-#         )
-#         meta_clf_fold.fit(X_tr_m, y_tr_m)
-#         oof_meta_scores[va_idx] = meta_clf_fold.predict_proba(X_va_m)[:, 1]
-#         meta_test_folds[:, fold - 1] = meta_clf_fold.predict_proba(test_base_mean)[:, 1]
-    
-#     # Final meta on full OOF (optional fit, used for reporting and stability)
-#     meta_clf.fit(oof_base, y)
-#     meta_test_scores = meta_test_folds.mean(axis=1)
-    
-#     # --- Quick OOF report for the stacked meta predictor ---
-#     oof_acc_default = accuracy_score(y, (oof_meta_scores >= 0.50).astype(int))
-#     try:
-#         oof_auc = roc_auc_score(y, oof_meta_scores)
-#     except Exception:
-#         oof_auc = np.nan
-    
-#     print("\n[OOF][Meta LR] Accuracy @ 0.50 = {:.4f}".format(oof_acc_default))
-#     print("[OOF][Meta LR] ROC-AUC = {:.4f}".format(oof_auc))
-
-#     results.append({
-#         "seed": seed,
-#         "auc": oof_auc,
-#         "y": y,
-#         "oof_meta_scores": oof_meta_scores,
-#         "meta_test_scores": meta_test_scores
-#     })
-
-# # ===============================================================
-# # BEST MODEL
-# # ===============================================================
-# best_result = max(results, key=lambda x: x["auc"])
-# best_seed = best_result["seed"]
-# best_auc = best_result["auc"]
-
-# y = best_result["y"]
-# oof_meta_scores = best_result["oof_meta_scores"]
-# meta_test_scores = best_result["meta_test_scores"]
-
-# print("\n" + "="*90)
-# print(f"Best model found with RANDOM_STATE = {best_seed}")
-# print(f"Best OOF AUC = {best_auc:.4f}")
-# print("="*90)
-# print("\nReady for 3.3 threshold tuning (variables: oof_meta_scores, meta_test_scores, y)")
-
-
-# In[7]:
-
-
+# ==========================================
+# 3.2 Stacking (LR + XGB + RF -> LR meta)
+# ==========================================
 import numpy as np
+import pandas as pd
+
 from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -2448,322 +1837,345 @@ from sklearn.calibration import CalibratedClassifierCV
 
 import xgboost as xgb
 
-# ===============================================================
-# MULTI-SEED ENSEMBLE WRAPPER
-# ===============================================================
 
-SEEDS = [(50, 55, 160)]
-results = []
+def run_stacking_mrk(
+    train_reduced: pd.DataFrame,
+    test_reduced: pd.DataFrame,
+    selected_cols: list[str],
+    seeds: list[tuple[int, int, int]] | None = None,
+    folds: int = 10,
+    meta_random_state: int = 42,
+) -> dict:
+    """
+    True OOF stacking for Mirko's model:
+      - Base learners: LogisticRegression, XGBoost, RandomForest
+      - Per-fold training, XGBoost + RF calibrated with sigmoid on the validation fold
+      - Meta-learner: LogisticRegression on base OOF probabilities
+      - Multi-seed wrapper over (LR_seed, XGB_seed, RF_seed) tuples
 
-for idx, (seed_lr, seed_xgb, seed_rf) in enumerate(SEEDS, 1):
-    print("\n" + "="*90)
-    print(f"Running stacking iteration {idx}")
-    print(f"LR_seed={seed_lr}, XGB_seed={seed_xgb}, RF_seed={seed_rf}")
-    print("="*90)
+    Parameters
+    ----------
+    train_reduced : pd.DataFrame
+        Must contain 'player_won' and the selected_cols.
+    test_reduced : pd.DataFrame
+        Must contain selected_cols.
+    selected_cols : list[str]
+        Feature names to use for the stacking (output of feature selection).
+    seeds : list[tuple[int, int, int]] or None, default None
+        List of (seed_lr, seed_xgb, seed_rf). If None, uses [(50, 55, 160)].
+    folds : int, default 10
+        Number of CV folds for stacking.
+    meta_random_state : int, default 42
+        Random state used for meta-learner CV splits.
 
-    # global random seed
-    META_RANDOM_STATE = 42
-    np.random.seed(META_RANDOM_STATE)
-    FOLDS = 10
+    Returns
+    -------
+    results : dict
+        {
+          "best_seed": str,
+          "best_auc": float,
+          "y": np.ndarray,                     # target
+          "oof_meta_scores": np.ndarray,       # OOF meta probabilities
+          "meta_test_scores": np.ndarray,      # stacked test probabilities
+          "all_results": list[dict]            # per-seed info
+        }
+    """
+    if seeds is None:
+        seeds = [(50, 55, 160)]
 
-    # orginal block stars from here <------
-    assert "selected_cols" in globals(), "Run Cell 3.1 to define 'selected_cols'."
-    assert "train_reduced" in globals() and "test_reduced" in globals(), "Missing reduced frames from 3.1."
-    
+    # Basic checks
+    if "player_won" not in train_reduced.columns:
+        raise ValueError("Column 'player_won' not found in train_reduced.")
+    for col in selected_cols:
+        if col not in train_reduced.columns:
+            raise ValueError(f"Selected feature '{col}' not found in train_reduced.")
+        if col not in test_reduced.columns:
+            raise ValueError(f"Selected feature '{col}' not found in test_reduced.")
+
+    # Matrices
     X_sel = train_reduced[selected_cols].to_numpy()
     X_test_sel = test_reduced[selected_cols].to_numpy()
     y = train_reduced["player_won"].astype(int).to_numpy()
-    
+
     n_train = X_sel.shape[0]
-    n_test  = X_test_sel.shape[0]
-    
+    n_test = X_test_sel.shape[0]
+
     print(f"[Stack LR+XGB+RF→LR] Using {X_sel.shape[1]} selected features on {n_train} training rows.")
-    
-    # --- Base learners -------------------------------------------------------------------------
-    # (1) Logistic Regression (scaled). No calibration needed.
-    base_lr = make_pipeline(
-        StandardScaler(),
-        LogisticRegression(
-            solver="liblinear",
-            penalty="l2",
-            C=0.5,
-            max_iter=3000,
-            random_state=seed_lr
-        )
-    )
-    
-    # (2) XGBoost (with early stopping). We'll calibrate per-fold on the val fold.
-    base_xgb_params = dict(
-        n_estimators=2000,           # high cap, early stopping will cut it
-        learning_rate=0.03,
-        max_depth=6,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_lambda=1.0,
-        reg_alpha=0.0,
-        objective="binary:logistic",
-        eval_metric="logloss",
-        random_state=seed_xgb,
-        n_jobs=-1,
-        tree_method="hist"
-    )
-    
-    # (3) Random Forest (regularized) + per-fold calibration
-    base_rf = RandomForestClassifier(
-        n_estimators=400,
-        max_depth=10,
-        min_samples_leaf=10,
-        max_features="sqrt",
-        bootstrap=True,
-        n_jobs=-1,
-        random_state=seed_rf
-    )
-    
-    base_names  = ["lr", "xgb", "rf"]
-    n_base      = len(base_names)
-    
-    # --- OOF holders for base learners (level-1 features) --------------------------------------
-    oof_base = np.zeros((n_train, n_base), dtype=float)
-    test_base_folds = np.zeros((n_test, n_base, FOLDS), dtype=float)
-    
-    skf = StratifiedKFold(n_splits=FOLDS, shuffle=True, random_state=RANDOM_STATE)
-    
-    print("\n[Per-fold validation summary]")
-    for fold, (tr_idx, va_idx) in enumerate(skf.split(X_sel, y), 1):
-        X_tr, X_va = X_sel[tr_idx], X_sel[va_idx]
-        y_tr, y_va = y[tr_idx], y[va_idx]
-    
-        # ---- Base 1: Logistic Regression (no calibration) ----
-        lr_model = make_pipeline(
+
+    all_results = []
+
+    for idx, (seed_lr, seed_xgb, seed_rf) in enumerate(seeds, start=1):
+        print("\n" + "=" * 90)
+        print(f"Running stacking iteration {idx}")
+        print(f"LR_seed={seed_lr}, XGB_seed={seed_xgb}, RF_seed={seed_rf}")
+        print("=" * 90)
+
+        # For meta-learner CV
+        np.random.seed(meta_random_state)
+        FOLDS = folds
+
+        # Base learners -----------------------------------------------------
+        base_lr = make_pipeline(
             StandardScaler(),
             LogisticRegression(
                 solver="liblinear",
                 penalty="l2",
                 C=0.5,
                 max_iter=3000,
-                random_state=seed_lr
-            )
+                random_state=seed_lr,
+            ),
         )
-        lr_model.fit(X_tr, y_tr)
-        lr_va = lr_model.predict_proba(X_va)[:, 1]
-        lr_te = lr_model.predict_proba(X_test_sel)[:, 1]
-    
-        # ---- Base 2: XGBoost (early stopping) + sigmoid calibration on val ----
-        xgb_model = xgb.XGBClassifier(**base_xgb_params)
-        xgb_model.fit(
-            X_tr, y_tr,
-            eval_set=[(X_va, y_va)],
-            verbose=False
+
+        base_xgb_params = dict(
+            n_estimators=2000,
+            learning_rate=0.03,
+            max_depth=6,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_lambda=1.0,
+            reg_alpha=0.0,
+            objective="binary:logistic",
+            eval_metric="logloss",
+            random_state=seed_xgb,
+            n_jobs=-1,
+            tree_method="hist",
         )
-    
-        # predictions at best iteration (handle API differences safely)
-        try:
-            best_it = getattr(xgb_model, "best_iteration", None)
-            if best_it is not None:
-                xgb_va_raw = xgb_model.predict_proba(X_va, iteration_range=(0, best_it + 1))[:, 1]
-                xgb_te_raw = xgb_model.predict_proba(X_test_sel, iteration_range=(0, best_it + 1))[:, 1]
-            else:
-                xgb_va_raw = xgb_model.predict_proba(X_va)[:, 1]
-                xgb_te_raw = xgb_model.predict_proba(X_test_sel)[:, 1]
-            used_best = best_it
-        except Exception:
-            xgb_va_raw = xgb_model.predict_proba(X_va)[:, 1]
-            xgb_te_raw = xgb_model.predict_proba(X_test_sel)[:, 1]
-            used_best = "N/A"
-    
-        # calibrate on the validation fold (no leakage)
-        xgb_cal = CalibratedClassifierCV(estimator=xgb_model, method="sigmoid", cv="prefit")
-        xgb_cal.fit(X_va, y_va)
-        xgb_va = xgb_cal.predict_proba(X_va)[:, 1]
-        xgb_te = xgb_cal.predict_proba(X_test_sel)[:, 1]
-    
-        # ---- Base 3: Random Forest + sigmoid calibration on val ----
-        rf_model = RandomForestClassifier(
+
+        base_rf_template = RandomForestClassifier(
             n_estimators=400,
             max_depth=10,
             min_samples_leaf=10,
             max_features="sqrt",
             bootstrap=True,
             n_jobs=-1,
-            random_state=seed_rf + fold  # slight variation per fold
+            random_state=seed_rf,
         )
-        rf_model.fit(X_tr, y_tr)
-        rf_cal = CalibratedClassifierCV(estimator=rf_model, method="sigmoid", cv="prefit")
-        rf_cal.fit(X_va, y_va)
-        rf_va = rf_cal.predict_proba(X_va)[:, 1]
-        rf_te = rf_cal.predict_proba(X_test_sel)[:, 1]
-    
-        # ---- Store OOF & per-fold test probs (level-1 design) ----
-        oof_base[va_idx, 0] = lr_va
-        oof_base[va_idx, 1] = xgb_va
-        oof_base[va_idx, 2] = rf_va
-    
-        test_base_folds[:, 0, fold - 1] = lr_te
-        test_base_folds[:, 1, fold - 1] = xgb_te
-        test_base_folds[:, 2, fold - 1] = rf_te
-    
-        # ---- Fold metrics (on validation) ----
-        # Report each base quickly (accuracy/AUC at 0.50)
-        def _rep(name, p):
-            acc = accuracy_score(y_va, (p >= 0.5).astype(int))
+
+        base_names = ["lr", "xgb", "rf"]
+        n_base = len(base_names)
+
+        # OOF holders (level-1 features)
+        oof_base = np.zeros((n_train, n_base), dtype=float)
+        test_base_folds = np.zeros((n_test, n_base, FOLDS), dtype=float)
+
+        skf = StratifiedKFold(
+            n_splits=FOLDS,
+            shuffle=True,
+            random_state=meta_random_state + idx,
+        )
+
+        print("\n[Per-fold validation summary]")
+        for fold, (tr_idx, va_idx) in enumerate(skf.split(X_sel, y), start=1):
+            X_tr, X_va = X_sel[tr_idx], X_sel[va_idx]
+            y_tr, y_va = y[tr_idx], y[va_idx]
+
+            # ---- Base 1: Logistic Regression (no calibration) ----
+            lr_model = make_pipeline(
+                StandardScaler(),
+                LogisticRegression(
+                    solver="liblinear",
+                    penalty="l2",
+                    C=0.5,
+                    max_iter=3000,
+                    random_state=seed_lr,
+                ),
+            )
+            lr_model.fit(X_tr, y_tr)
+            lr_va = lr_model.predict_proba(X_va)[:, 1]
+            lr_te = lr_model.predict_proba(X_test_sel)[:, 1]
+
+            # ---- Base 2: XGBoost (with calibration) ----
+            xgb_model = xgb.XGBClassifier(**base_xgb_params)
+            xgb_model.fit(
+                X_tr,
+                y_tr,
+                eval_set=[(X_va, y_va)],
+                verbose=False,
+            )
+
             try:
-                auc = roc_auc_score(y_va, p)
+                best_it = getattr(xgb_model, "best_iteration", None)
+                if best_it is not None:
+                    xgb_va_raw = xgb_model.predict_proba(
+                        X_va, iteration_range=(0, best_it + 1)
+                    )[:, 1]
+                    xgb_te_raw = xgb_model.predict_proba(
+                        X_test_sel, iteration_range=(0, best_it + 1)
+                    )[:, 1]
+                else:
+                    xgb_va_raw = xgb_model.predict_proba(X_va)[:, 1]
+                    xgb_te_raw = xgb_model.predict_proba(X_test_sel)[:, 1]
+                used_best = best_it
             except Exception:
-                auc = np.nan
-            return acc, auc
-    
-        acc_lr, auc_lr   = _rep("lr",  lr_va)
-        acc_xgb, auc_xgb = _rep("xgb", xgb_va)
-        acc_rf, auc_rf   = _rep("rf",  rf_va)
-    
-        print(f"  [Fold {fold}] "
-              f"LR  acc={acc_lr:.4f} | AUC={auc_lr:.4f}  ||  "
-              f"XGB acc={acc_xgb:.4f} | AUC={auc_xgb:.4f} | best_iter={used_best}  ||  "
-              f"RF  acc={acc_rf:.4f} | AUC={auc_rf:.4f}")
-    
-    # --- Aggregate test probs across folds for each base learner ---
-    test_base_mean = test_base_folds.mean(axis=2)   # shape: (n_test, 3)
-    
-    # --- Meta-learner on OOF base features (with second-level OOF for honest estimate) ----------
-    meta_clf = LogisticRegression(
-        solver="lbfgs",
-        penalty="l2",
-        C=1.0,
-        max_iter=5000,
-        random_state=META_RANDOM_STATE
-    )
-    
-    # Build true OOF for meta as well
-    oof_meta_scores = np.zeros(n_train, dtype=float)
-    meta_test_folds = np.zeros((n_test, FOLDS), dtype=float)
-    
-    skf_meta = StratifiedKFold(n_splits=FOLDS, shuffle=True, random_state=META_RANDOM_STATE + 1)
-    for fold, (tr_idx, va_idx) in enumerate(skf_meta.split(oof_base, y), 1):
-        X_tr_m, X_va_m = oof_base[tr_idx], oof_base[va_idx]
-        y_tr_m, y_va_m = y[tr_idx], y[va_idx]
-    
-        meta_clf_fold = LogisticRegression(
+                xgb_va_raw = xgb_model.predict_proba(X_va)[:, 1]
+                xgb_te_raw = xgb_model.predict_proba(X_test_sel)[:, 1]
+                used_best = "N/A"
+
+            xgb_cal = CalibratedClassifierCV(
+                estimator=xgb_model, method="sigmoid", cv="prefit"
+            )
+            xgb_cal.fit(X_va, y_va)
+            xgb_va = xgb_cal.predict_proba(X_va)[:, 1]
+            xgb_te = xgb_cal.predict_proba(X_test_sel)[:, 1]
+
+            # ---- Base 3: Random Forest (per-fold seed) + calibration ----
+            rf_model = RandomForestClassifier(
+                n_estimators=base_rf_template.n_estimators,
+                max_depth=base_rf_template.max_depth,
+                min_samples_leaf=base_rf_template.min_samples_leaf,
+                max_features=base_rf_template.max_features,
+                bootstrap=True,
+                n_jobs=-1,
+                random_state=seed_rf + fold,  # slight variation per fold
+            )
+            rf_model.fit(X_tr, y_tr)
+            rf_cal = CalibratedClassifierCV(
+                estimator=rf_model, method="sigmoid", cv="prefit"
+            )
+            rf_cal.fit(X_va, y_va)
+            rf_va = rf_cal.predict_proba(X_va)[:, 1]
+            rf_te = rf_cal.predict_proba(X_test_sel)[:, 1]
+
+            # Store OOF + test probs
+            oof_base[va_idx, 0] = lr_va
+            oof_base[va_idx, 1] = xgb_va
+            oof_base[va_idx, 2] = rf_va
+
+            test_base_folds[:, 0, fold - 1] = lr_te
+            test_base_folds[:, 1, fold - 1] = xgb_te
+            test_base_folds[:, 2, fold - 1] = rf_te
+
+            # Quick metrics per fold
+            def _rep(p):
+                acc = accuracy_score(y_va, (p >= 0.5).astype(int))
+                try:
+                    auc = roc_auc_score(y_va, p)
+                except Exception:
+                    auc = np.nan
+                return acc, auc
+
+            acc_lr, auc_lr = _rep(lr_va)
+            acc_xgb, auc_xgb = _rep(xgb_va)
+            acc_rf, auc_rf = _rep(rf_va)
+
+            print(
+                f"  [Fold {fold}] "
+                f"LR  acc={acc_lr:.4f} | AUC={auc_lr:.4f}  ||  "
+                f"XGB acc={acc_xgb:.4f} | AUC={auc_xgb:.4f} | best_iter={used_best}  ||  "
+                f"RF  acc={acc_rf:.4f} | AUC={auc_rf:.4f}"
+            )
+
+        # Aggregate test probs across folds for each base learner
+        test_base_mean = test_base_folds.mean(axis=2)  # shape: (n_test, 3)
+
+        # Meta-learner on OOF base features (true OOF again)
+        meta_clf_base = LogisticRegression(
             solver="lbfgs",
             penalty="l2",
             C=1.0,
             max_iter=5000,
-            random_state=META_RANDOM_STATE + fold
+            random_state=meta_random_state,
         )
-        meta_clf_fold.fit(X_tr_m, y_tr_m)
-        oof_meta_scores[va_idx] = meta_clf_fold.predict_proba(X_va_m)[:, 1]
-        meta_test_folds[:, fold - 1] = meta_clf_fold.predict_proba(test_base_mean)[:, 1]
-    
-    # Final meta on full OOF (optional fit, used for reporting and stability)
-    meta_clf.fit(oof_base, y)
-    meta_test_scores = meta_test_folds.mean(axis=1)
-    
-    # --- Quick OOF report for the stacked meta predictor ---
-    oof_acc_default = accuracy_score(y, (oof_meta_scores >= 0.50).astype(int))
-    try:
-        oof_auc = roc_auc_score(y, oof_meta_scores)
-    except Exception:
-        oof_auc = np.nan
-    
-    print("\n[OOF][Meta LR] Accuracy @ 0.50 = {:.4f}".format(oof_acc_default))
-    print("[OOF][Meta LR] ROC-AUC = {:.4f}".format(oof_auc))
 
-    results.append({
-        "seed": f"LR_seed={seed_lr}, XGB_seed={seed_xgb}, RF_seed={seed_rf}",
-        "auc": oof_auc,
-        "y": y,
-        "oof_meta_scores": oof_meta_scores,
-        "meta_test_scores": meta_test_scores
-    })
+        oof_meta_scores = np.zeros(n_train, dtype=float)
+        meta_test_folds = np.zeros((n_test, FOLDS), dtype=float)
 
-# ===============================================================
-# BEST MODEL
-# ===============================================================
-best_result = max(results, key=lambda x: x["auc"])
-best_seed = best_result["seed"]
-best_auc = best_result["auc"]
+        skf_meta = StratifiedKFold(
+            n_splits=FOLDS,
+            shuffle=True,
+            random_state=meta_random_state + 1,
+        )
+        for fold, (tr_idx, va_idx) in enumerate(skf_meta.split(oof_base, y), start=1):
+            X_tr_m, X_va_m = oof_base[tr_idx], oof_base[va_idx]
+            y_tr_m, y_va_m = y[tr_idx], y[va_idx]
 
-y = best_result["y"]
-oof_meta_scores = best_result["oof_meta_scores"]
-meta_test_scores = best_result["meta_test_scores"]
+            meta_clf_fold = LogisticRegression(
+                solver="lbfgs",
+                penalty="l2",
+                C=1.0,
+                max_iter=5000,
+                random_state=meta_random_state + fold,
+            )
+            meta_clf_fold.fit(X_tr_m, y_tr_m)
+            oof_meta_scores[va_idx] = meta_clf_fold.predict_proba(X_va_m)[:, 1]
+            meta_test_folds[:, fold - 1] = meta_clf_fold.predict_proba(
+                test_base_mean
+            )[:, 1]
 
-print("\n" + "="*90)
-print(f"Best model found with {best_seed}")
-print(f"Best OOF AUC = {best_auc:.4f}")
-print("="*90)
-print("\nReady for 3.3 threshold tuning (variables: oof_meta_scores, meta_test_scores, y)")
+        # Final meta on full OOF
+        meta_clf_base.fit(oof_base, y)
+        meta_test_scores = meta_test_folds.mean(axis=1)
 
+        oof_acc_default = accuracy_score(
+            y, (oof_meta_scores >= 0.50).astype(int)
+        )
+        try:
+            oof_auc = roc_auc_score(y, oof_meta_scores)
+        except Exception:
+            oof_auc = np.nan
 
-# ## 3.3 - Threshold tuning for the StackingClassifier (uses OOF probs)
+        print("\n[OOF][Meta LR] Accuracy @ 0.50 = {:.4f}".format(oof_acc_default))
+        print("[OOF][Meta LR] ROC-AUC = {:.4f}".format(oof_auc))
 
-# In[8]:
+        all_results.append(
+            {
+                "seed": f"LR_seed={seed_lr}, XGB_seed={seed_xgb}, RF_seed={seed_rf}",
+                "auc": oof_auc,
+                "y": y,
+                "oof_meta_scores": oof_meta_scores,
+                "meta_test_scores": meta_test_scores,
+            }
+        )
 
+    # Pick best by AUC
+    best_result = max(all_results, key=lambda x: x["auc"])
+    best_seed = best_result["seed"]
+    best_auc = best_result["auc"]
 
-# === 3.3 Threshold tuning for the StackingClassifier (uses in-sample probs) ===
-# Inputs expected from 3.2: y, oof_meta_scores, meta_test_scores
-# Outputs: STACK_FINAL_THRESHOLD, STACK_FINAL_OOF_ACC, stack_pred_labels_tuned
+    print("\n" + "=" * 90)
+    print(f"Best stacked model found with {best_seed}")
+    print(f"Best OOF AUC = {best_auc:.4f}")
+    print("=" * 90)
+    print(
+        "\nReady for threshold tuning (variables: oof_meta_scores, meta_test_scores, y)"
+    )
 
-import numpy as np
-from sklearn.metrics import accuracy_score
+    return {
+        "best_seed": best_seed,
+        "best_auc": best_auc,
+        "y": best_result["y"],
+        "oof_meta_scores": best_result["oof_meta_scores"],
+        "meta_test_scores": best_result["meta_test_scores"],
+        "all_results": all_results,
+    }
 
-# --- Safety checks ---
-missing = [name for name in ["y", "oof_meta_scores", "meta_test_scores"] if name not in globals()]
-if missing:
-    raise RuntimeError(f"Missing required objects from 3.2: {missing}. Please run Cell 3.2 first.")
+# === 3.3 Threshold tuning for stacked model (Model 3) ===
+from importlib.machinery import SourceFileLoader
 
-# --- Baseline @ 0.50 ---
-oof_acc_default = accuracy_score(y, (oof_meta_scores >= 0.50).astype(int))
-print(f"[Stacking][OOF] Accuracy @ 0.50 = {oof_acc_default:.4f}")
+REPO_NAME = "FDS_COMP_2025"
+model3_path = f"{REPO_NAME}/mrk-notebook-fds.py"
+model3 = SourceFileLoader("model3_module", model3_path).load_module()
 
-# --- Coarse search over thresholds ---
-ths_coarse = np.linspace(0.30, 0.70, 121)  # step 0.0033...
-accs_coarse = [accuracy_score(y, (oof_meta_scores >= t).astype(int)) for t in ths_coarse]
-best_idx_c = int(np.argmax(accs_coarse))
-best_thr_coarse = float(ths_coarse[best_idx_c])
-print(f"[Stacking][Search] Coarse best: thr={best_thr_coarse:.3f} | OOF acc={accs_coarse[best_idx_c]:.4f}")
+threshold_results_m3 = model3.tune_stacking_threshold_mrk(
+    y=y_m3,
+    oof_meta_scores=oof_meta_scores_m3,
+    meta_test_scores=meta_test_scores_m3,
+    coarse_lo=0.30,
+    coarse_hi=0.70,
+    coarse_points=121,
+    fine_window=0.05,
+    fine_step=0.001,
+    verbose=True,
+)
 
-# --- Fine search around the coarse best ---
-fine_lo = max(0.0, best_thr_coarse - 0.05)
-fine_hi = min(1.0, best_thr_coarse + 0.05)
-ths_fine = np.arange(fine_lo, fine_hi + 1e-12, 0.001)
+STACK_FINAL_THRESHOLD = threshold_results_m3["final_threshold"]
+STACK_FINAL_OOF_ACC   = threshold_results_m3["final_oof_acc"]
+stack_pred_labels_tuned = threshold_results_m3["test_labels"]
 
-accs_fine = [accuracy_score(y, (oof_meta_scores >= t).astype(int)) for t in ths_fine]
-best_idx_f = int(np.argmax(accs_fine))
-STACK_FINAL_THRESHOLD = float(ths_fine[best_idx_f])
-STACK_FINAL_OOF_ACC   = float(accs_fine[best_idx_f])
-
-print(f"[Stacking][Best] Final OOF threshold = {STACK_FINAL_THRESHOLD:.3f} | OOF Accuracy = {STACK_FINAL_OOF_ACC:.4f}")
-
-# --- Apply tuned threshold to TEST ---
-stack_pred_labels_tuned = (meta_test_scores >= STACK_FINAL_THRESHOLD).astype(int)
+print("\n[Threshold] Final tuned threshold:", STACK_FINAL_THRESHOLD)
+print("[Threshold] Final OOF accuracy:", STACK_FINAL_OOF_ACC)
 print("✅ Created 'stack_pred_labels_tuned' for submission.")
 
-
-# # 4. Creating the Submission File
-
-# In[9]:
-
-
-# === 4. Submission (StackingClassifier tuned threshold ONLY) ===
-import pandas as pd
-
-# Safety checks
-if "stack_pred_labels_tuned" not in globals():
-    raise RuntimeError("Missing 'stack_pred_labels_tuned'. Run Cell 3.3 first.")
-if "test_df" not in globals() or "battle_id" not in test_df.columns:
-    raise RuntimeError("Missing 'test_df' with 'battle_id' column.")
-
-submission = pd.DataFrame({
-    "battle_id": test_df["battle_id"].values,
-    "player_won": stack_pred_labels_tuned.astype(int)
-})
-
-save_path = "/kaggle/working/submission.csv"
-submission.to_csv(save_path, index=False)
-note = f"StackingClassifier (LR+XGB+RF → LR meta), tuned thr={float(STACK_FINAL_THRESHOLD):.3f}"
-
-print(f"Submission saved to {save_path}")
-print(f"Note: {note}")
-display(submission.head())
 
 
 # ### 5. Submitting Your Results
