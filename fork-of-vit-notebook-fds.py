@@ -1823,7 +1823,13 @@ def run_feature_engineering_fork(train_data, test_file_path):
     print("\n[Advanced Top-5] train_df shape:", train_df.shape)
     print("[Advanced Top-5] test_df  shape:", test_df.shape)
 
-    return train_df, test_df, train_df_raw, test_df_raw, scaler, POKEMON_STATS, POKEMON_HP_STATS, pokemon_avg_damage
+    # Optional: defragment DataFrames to avoid PerformanceWarning
+    train_df = train_df.copy()
+    test_df = test_df.copy()
+
+    # Return exactly 5 objects, matching the notebook unpacking
+    return train_df, test_df, train_df_raw, test_df_raw, scaler
+
 
 # # 3. Models Training
 
