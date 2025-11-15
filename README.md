@@ -5,13 +5,23 @@ Each model is provided as a separate Python script.
 
 ## Repository Contents
 
-- **model-1.py** — Model 1  
-- **model-2.py** — Model 2  
-- **model-3.py** — Model 3  
+- **model-1.py**   
+- **model-2.py**   
+- **model-3.py** 
 
 Each script implements a complete model and produces its own output file.
 
+## How to use 
 
+## Short description of the models
+### Model 1 — “fork-of-vit-notebook-fds2-final.py”
+A model with an extensive feature engineering pipeline, feature selection via correlation-based filters and L1 regularization, and a multi-model stacking ensemble with optimized decision thresholding.
+
+### Model 2 — “fork-of-vit-notebook-fds.py”
+A model with a structured feature engineering pipeline, feature selection via correlations and Top-K ranking, and a calibrated multi-model stacking ensemble with optimized decision thresholding.
+
+### Model 3 — “mrk-notebook-fds.py”
+A model with a targeted feature engineering pipeline, feature selection via VIF pruning and Elastic Net, and a multi-model stacking ensemble with multi-seed validation and optimized decision thresholding.
 
 
 
