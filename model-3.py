@@ -2149,34 +2149,113 @@ def run_stacking_mrk(
         "all_results": all_results,
     }
 
-# === 3.3 Threshold tuning for stacked model (Model 3) ===
-from importlib.machinery import SourceFileLoader
-
-REPO_NAME = "FDS_COMP_2025"
-model3_path = f"{REPO_NAME}/mrk-notebook-fds.py"
-model3 = SourceFileLoader("model3_module", model3_path).load_module()
-
-threshold_results_m3 = model3.tune_stacking_threshold_mrk(
-    y=y_m3,
-    oof_meta_scores=oof_meta_scores_m3,
-    meta_test_scores=meta_test_scores_m3,
-    coarse_lo=0.30,
-    coarse_hi=0.70,
-    coarse_points=121,
-    fine_window=0.05,
-    fine_step=0.001,
-    verbose=True,
-)
-
-STACK_FINAL_THRESHOLD = threshold_results_m3["final_threshold"]
-STACK_FINAL_OOF_ACC   = threshold_results_m3["final_oof_acc"]
-stack_pred_labels_tuned = threshold_results_m3["test_labels"]
-
-print("\n[Threshold] Final tuned threshold:", STACK_FINAL_THRESHOLD)
-print("[Threshold] Final OOF accuracy:", STACK_FINAL_OOF_ACC)
-print("✅ Created 'stack_pred_labels_tuned' for submission.")
+# ==========================================
+# 3.3 Threshold tuning for stacked model
+# ==========================================
+import numpy as np
+from sklearn.metrics import accuracy_score
 
 
+def tune_stacking_threshold_mrk(
+    y,
+    oof_meta_scores,
+    meta_test_scores,
+    coarse_lo: float = 0.30,
+    coarse_hi: float = 0.70,
+    coarse_points: int = 121,
+    fine_window: float = 0.05,
+    fine_step: float = 0.001,
+    verbose: bool = True,
+) -> dict:
+    """
+    Threshold tuning for stacked model using OOF probabilities.
+
+    Parameters
+    ----------
+    y : array-like
+        True labels for training set (0/1).
+    oof_meta_scores : array-like
+        OOF probabilities from the stacked meta model (len = len(y)).
+    meta_test_scores : array-like
+        Test probabilities from the stacked meta model (len = n_test).
+    coarse_lo, coarse_hi : float
+        Range of thresholds for coarse search.
+    coarse_points : int
+        Number of thresholds in coarse grid.
+    fine_window : float
+        Half-width of fine search window around best coarse threshold.
+    fine_step : float
+        Step size for fine search.
+    verbose : bool
+        If True, prints diagnostics.
+
+    Returns
+    -------
+    result : dict
+        {
+          "final_threshold": float,
+          "final_oof_acc": float,
+          "oof_labels": np.ndarray,   # labels on train using tuned thr
+          "test_labels": np.ndarray,  # labels on test using tuned thr
+          "baseline_acc": float,
+          "coarse_best_thr": float,
+          "coarse_best_acc": float,
+        }
+    """
+    y = np.asarray(y).astype(int)
+    oof = np.asarray(oof_meta_scores, dtype=float)
+    te = np.asarray(meta_test_scores, dtype=float)
+
+    if y.shape[0] != oof.shape[0]:
+        raise ValueError("y and oof_meta_scores must have the same length.")
+
+    # Baseline @ 0.50
+    baseline_acc = accuracy_score(y, (oof >= 0.50).astype(int))
+    if verbose:
+        print(f"[Stacking][OOF] Accuracy @ 0.50 = {baseline_acc:.4f}")
+
+    # Coarse search
+    ths_coarse = np.linspace(coarse_lo, coarse_hi, coarse_points)
+    accs_coarse = [accuracy_score(y, (oof >= t).astype(int)) for t in ths_coarse]
+    best_idx_c = int(np.argmax(accs_coarse))
+    best_thr_coarse = float(ths_coarse[best_idx_c])
+    best_acc_coarse = float(accs_coarse[best_idx_c])
+
+    if verbose:
+        print(
+            f"[Stacking][Search] Coarse best: thr={best_thr_coarse:.3f} "
+            f"| OOF acc={best_acc_coarse:.4f}"
+        )
+
+    # Fine search around coarse best
+    fine_lo = max(0.0, best_thr_coarse - fine_window)
+    fine_hi = min(1.0, best_thr_coarse + fine_window)
+    ths_fine = np.arange(fine_lo, fine_hi + 1e-12, fine_step)
+
+    accs_fine = [accuracy_score(y, (oof >= t).astype(int)) for t in ths_fine]
+    best_idx_f = int(np.argmax(accs_fine))
+    final_thr = float(ths_fine[best_idx_f])
+    final_acc = float(accs_fine[best_idx_f])
+
+    if verbose:
+        print(
+            f"[Stacking][Best] Final OOF threshold = {final_thr:.3f} "
+            f"| OOF Accuracy = {final_acc:.4f}"
+        )
+
+    # Labels with tuned threshold
+    oof_labels = (oof >= final_thr).astype(int)
+    test_labels = (te >= final_thr).astype(int)
+
+    return {
+        "final_threshold": final_thr,
+        "final_oof_acc": final_acc,
+        "oof_labels": oof_labels,
+        "test_labels": test_labels,
+        "baseline_acc": baseline_acc,
+        "coarse_best_thr": best_thr_coarse,
+        "coarse_best_acc": best_acc_coarse,
+    }
 
 # ### 5. Submitting Your Results
 # 
