@@ -2218,9 +2218,9 @@ display(train_df.head())
 
 
 # ============================================================================
-# CLUSTERING CON WIN RATE 
+# CLUSTERING WITH WIN RATE
 # ============================================================================
-
+from sklearn.preprocessing import RobustScaler
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
@@ -2229,18 +2229,18 @@ import warnings
 warnings.filterwarnings('ignore')
 
 print("\n" + "="*70)
-print(" CLUSTERING CON WIN RATE PER OGNI CLUSTER")
+print(" # CLUSTERING WITH WIN RATE FOR EACH CLUSTER")
 print("="*70)
 
 # -----------------------------------------------------------------------------
-# STEP 1: Prepara i dati per il clustering 
+#  Prepare data for clustering
 # -----------------------------------------------------------------------------
 
-# Colonne da escludere
+# Columns to exclude
 exclude_cols = ['battle_id', 'player_won']
 feature_cols = [c for c in train_df.columns if c not in exclude_cols]
 
-# Dati per clustering 
+# Data for clustering 
 X_train_cluster = train_df[feature_cols].fillna(0).values
 X_test_cluster = test_df[feature_cols].fillna(0).values
 y_train = train_df['player_won'].values
@@ -2250,14 +2250,13 @@ print(f"Samples train: {len(X_train_cluster)}")
 print(f"Samples test: {len(X_test_cluster)}")
 
 # -----------------------------------------------------------------------------
-# STEP 2: Trova numero ottimale di cluster (metodo Elbow + Silhouette)
+# Find the optimal number of clusters (Elbow + Silhouette method)
 # -----------------------------------------------------------------------------
 
 from sklearn.metrics import silhouette_score
 
-print("\n Ricerca numero ottimale di cluster...")
 
-# Testa da 3 a 15 cluster
+# Test from 3 to 15 clusters
 k_range = range(3, 16)
 inertias = []
 silhouettes = []
@@ -2270,44 +2269,42 @@ for k in k_range:
     silhouettes.append(sil_score)
     print(f"  K={k:2d} | Inertia: {kmeans_temp.inertia_:,.0f} | Silhouette: {sil_score:.4f}")
 
-# Trova il miglior K basato su Silhouette score
+# Find the best K based on Silhouette score
 best_k_idx = np.argmax(silhouettes)
 BEST_K = list(k_range)[best_k_idx]
 
-print(f"\n Numero ottimale di cluster: {BEST_K} (Silhouette: {silhouettes[best_k_idx]:.4f})")
+print(f"\n # Optimal number of clusters: {BEST_K} (Silhouette: {silhouettes[best_k_idx]:.4f})")
 
 # -----------------------------------------------------------------------------
-# STEP 3: Clustering finale con K ottimale
+# Final clustering with optimal K
 # -----------------------------------------------------------------------------
 
-print(f"\n Clustering con K={BEST_K}...")
+print(f"\n Clustering with K={BEST_K}...")
 
 kmeans_final = KMeans(
     n_clusters=BEST_K, 
     random_state=42, 
-    n_init=20,  # Più inizializzazioni per stabilità
+    n_init=20,  
     max_iter=500
 )
 
-# Fit su train e predici su train e test
+# Fit on train and predict on train and test
 train_clusters = kmeans_final.fit_predict(X_train_cluster)
 test_clusters = kmeans_final.predict(X_test_cluster)
 
-print(f"Clustering completato!")
+print(f"Clustering completed")
 
 # -----------------------------------------------------------------------------
-# STEP 4: Calcola WIN RATE per ogni cluster
+# Calculate win rate for each cluster
 # -----------------------------------------------------------------------------
 
-print(f"\n Calcolo Win Rate per cluster...")
+print(f"\n Win rate calculation per cluster...")
 
-# Crea DataFrame con cluster e target
 cluster_analysis = pd.DataFrame({
     'cluster': train_clusters,
     'player_won': y_train
 })
 
-# Calcola statistiche per cluster
 cluster_stats = cluster_analysis.groupby('cluster').agg({
     'player_won': ['count', 'sum', 'mean']
 }).round(4)
@@ -2316,27 +2313,27 @@ cluster_stats.columns = ['sample_count', 'wins', 'win_rate']
 cluster_stats = cluster_stats.sort_values('win_rate', ascending=False)
 
 print("\n" + "="*70)
-print(" STATISTICHE PER CLUSTER (ordinati per Win Rate)")
+print(" CLUSTER STATISTICS (sorted by win rate)")
 print("="*70)
 print(cluster_stats)
 print("="*70)
 
 # -----------------------------------------------------------------------------
-# STEP 5: Crea dizionario cluster -> win_rate
+# Create dictionary cluster -> win_rate
 # -----------------------------------------------------------------------------
 
 cluster_to_winrate = cluster_stats['win_rate'].to_dict()
 
-print(f"\n Mappatura Cluster -> Win Rate creata:")
+print(f"\n Cluster-to-Win Rate mapping created:")
 for cluster_id, wr in sorted(cluster_to_winrate.items(), key=lambda x: x[1], reverse=True):
     samples = cluster_stats.loc[cluster_id, 'sample_count']
     print(f"   Cluster {cluster_id}: {wr:.4f} ({int(samples)} samples)")
 
 # -----------------------------------------------------------------------------
-# STEP 6: Aggiungi feature "cluster_win_rate" a train e test
+# Add "cluster_win_rate" feature to train and test
 # -----------------------------------------------------------------------------
 
-print(f"\n Aggiunta feature 'cluster_win_rate' ai dataset...")
+print(f"\n Added 'cluster_win_rate' feature to the datasets...")
 
 train_df['cluster_id'] = train_clusters
 train_df['cluster_win_rate'] = train_df['cluster_id'].map(cluster_to_winrate)
@@ -2344,14 +2341,14 @@ train_df['cluster_win_rate'] = train_df['cluster_id'].map(cluster_to_winrate)
 test_df['cluster_id'] = test_clusters
 test_df['cluster_win_rate'] = test_df['cluster_id'].map(cluster_to_winrate)
 
-print(f" Feature aggiunta a train_df")
-print(f" Feature aggiunta a test_df")
+print(f" Added new feature to train_df")
+print(f" Added new feature to test_df")
 
 # -----------------------------------------------------------------------------
-# STEP 7: Analisi distribuzione cluster nel test set
+# Cluster distribution analysis in the test set
 # -----------------------------------------------------------------------------
 
-print(f"\n Distribuzione cluster nel TEST set:")
+print(f"\n Cluster Distribution on TEST set:")
 test_cluster_dist = pd.Series(test_clusters).value_counts().sort_index()
 for cluster_id, count in test_cluster_dist.items():
     wr = cluster_to_winrate.get(cluster_id, 0.5)
@@ -2359,56 +2356,56 @@ for cluster_id, count in test_cluster_dist.items():
     print(f"   Cluster {cluster_id}: {count:4d} samples ({pct:5.2f}%) | Win Rate: {wr:.4f}")
 
 # -----------------------------------------------------------------------------
-# STEP 8: Verifica la nuova feature
+# Verify new feature
 # -----------------------------------------------------------------------------
 
-print(f"\n Preview nuova feature:")
-print("\nTRAIN (prime 5 righe):")
+print(f"\n Preview new feature:")
+print("\nTRAIN (first 5 rows):")
 print(train_df[['battle_id', 'cluster_id', 'cluster_win_rate', 'player_won']].head())
 
-print("\nTEST (prime 5 righe):")
+print("\nTEST (first 5 rows):")
 print(test_df[['battle_id', 'cluster_id', 'cluster_win_rate']].head())
 
 # -----------------------------------------------------------------------------
-# STEP 9: Statistiche sulla qualità del clustering
+# Clustering quality statistics
 # -----------------------------------------------------------------------------
 
 print(f"\n" + "="*70)
-print(" METRICHE DI QUALITÀ DEL CLUSTERING")
+print(" CLUSTERING QUALITY METRICS")
 print("="*70)
 
-# Calcola quanto la cluster_win_rate è correlata con il vero risultato
+# Calculate how cluster_win_rate correlates with the true outcome
 from scipy.stats import pearsonr
 
 correlation, p_value = pearsonr(train_df['cluster_win_rate'], train_df['player_won'])
-print(f" Correlazione Cluster Win Rate <-> Actual Win: {correlation:.4f} (p={p_value:.4e})")
+print(f" Cluster Win Rate correlation <-> Actual Win: {correlation:.4f} (p={p_value:.4e})")
 
-# Calcola l'accuracy se usassimo solo il cluster_win_rate
+# Calculate the accuracy if we used only the cluster_win_rate
 threshold = 0.5
 cluster_predictions = (train_df['cluster_win_rate'] >= threshold).astype(int)
 cluster_accuracy = (cluster_predictions == train_df['player_won']).mean()
-print(f" Accuracy usando solo Cluster Win Rate @ 0.5: {cluster_accuracy:.4f}")
+print(f" Accuracy using only Cluster Win Rate @ 0.5: {cluster_accuracy:.4f}")
 
-# Trova il miglior threshold
+# Find the best threshold
 thresholds = np.linspace(0.3, 0.7, 41)
 accuracies = [(train_df['cluster_win_rate'] >= t).astype(int) == train_df['player_won'] 
               for t in thresholds]
 best_acc = max([acc.mean() for acc in accuracies])
 best_thr = thresholds[np.argmax([acc.mean() for acc in accuracies])]
-print(f" Miglior Accuracy con threshold ottimale ({best_thr:.3f}): {best_acc:.4f}")
+print(f" Best accuracy with optimal threshold ({best_thr:.3f}): {best_acc:.4f}")
 
-# Varianza delle win rate tra cluster
+# Variance of win rates across clusters
 winrate_std = cluster_stats['win_rate'].std()
 winrate_range = cluster_stats['win_rate'].max() - cluster_stats['win_rate'].min()
-print(f" Varianza Win Rate tra cluster: {winrate_std:.4f}")
+print(f" Win rate variance across clusters: {winrate_std:.4f}")
 print(f" Range Win Rate: [{cluster_stats['win_rate'].min():.4f}, {cluster_stats['win_rate'].max():.4f}]")
 
 print("\n" + "="*70)
-print(" CLUSTERING COMPLETATO!")
+print(" CLUSTERING COMPLETED")
 print("="*70)
-print("\nLe nuove feature sono state aggiunte:")
-print("  - 'cluster_id': ID del cluster (0 a {})".format(BEST_K-1))
-print("  - 'cluster_win_rate': Win rate del cluster (0.0 a 1.0)")
+print("\n The new features have been added:")
+print("  - 'cluster_id': Cluster ID (0 a {})".format(BEST_K-1))
+print("  - 'cluster_win_rate': Cluster win rate (0.0 a 1.0)")
 print("="*70)
 
 
