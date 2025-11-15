@@ -743,14 +743,6 @@ def damage_feature_for_battle(record, avg_damage):
         "damage_prediction": feature        #final prediction (1 or 0)
     }
     
-#Team Winrate Score
-POKEMON_STATS = build_pokemon_win_stats(train_data, alpha=1.0) 
-#HP Survival Score
-POKEMON_HP_STATS = build_pokemon_hp_stats(train_data)
-#Average Damage Score
-pokemon_avg_damage = build_pokemon_avg_damage(train_data)
-
-
 # In[4]:
 
 
@@ -2262,7 +2254,57 @@ def _maybe_add_interactions(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-# In[6]:
+# ============================================
+# MASTER FEATURE ENGINEERING FUNCTION
+# ============================================
+def run_feature_engineering(
+    train_data: list[dict],
+    test_data: list[dict],
+    alpha: float = 1.0
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Main entry point called from the notebook.
+
+    Steps:
+    1) Initialize global Pokémon stats from train_data
+       (team winrate, HP survival, average damage).
+    2) Extract per-battle features for TRAIN and TEST via _one_record_features.
+    3) Add interaction features to both train_df and test_df.
+    4) Return (train_df, test_df).
+
+    Parameters
+    ----------
+    train_data : list[dict]
+        Raw list of JSON-like battles from train.jsonl.
+    test_data : list[dict]
+        Raw list of JSON-like battles from test.jsonl.
+    alpha : float, default=1.0
+        Laplace smoothing parameter for win-rate stats.
+
+    Returns
+    -------
+    (train_df, test_df) : (pd.DataFrame, pd.DataFrame)
+        Feature matrices ready for modeling.
+    """
+    # 1) Init global Pokémon stats (needed inside _one_record_features)
+    init_pokemon_stats(train_data, alpha=alpha)
+
+    # 2) Base feature extraction for train & test
+    print("[FE] Extracting features for TRAIN...")
+    train_df = create_simple_features(train_data)
+
+    print("[FE] Extracting features for TEST...")
+    test_df = create_simple_features(test_data)
+
+    # 3) Add interaction features (same logic for both)
+    print("[FE] Adding interaction features...")
+    train_df = _maybe_add_interactions(train_df)
+    test_df = _maybe_add_interactions(test_df)
+
+    # 4) Final sanity check
+    print(f"[FE] Done. Train shape: {train_df.shape} | Test shape: {test_df.shape}")
+    return train_df, test_df
+
 
 
 # ============================================================================
