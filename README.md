@@ -1,3 +1,32 @@
+# FDS_COMP_2025 — Kaggle Competition (Pokémon Battle Prediction 2025)
+
+This repository contains three independent models designed to generate submissions for the Kaggle competition **“FDS — Pokémon Battles Prediction 2025.”**  
+Each model is provided as a separate Python script.
+
+## Repository Contents
+
+- **model-1.py** — Model 1  
+- **model-2.py** — Model 2  
+- **model-3.py** — Model 3  
+
+Each script implements a complete model and produces its own output file.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############################################################################################################################################################################
 # FDS challenge: DEB | MRK | VIT
 ## SUBMISSION 1 - for *"fork-of-vit-notebook-fds2-final.py"*
 - **Feature engineering**:
