@@ -15,93 +15,15 @@
 # =========================
 #       GLOBAL IMPORTS
 # =========================
-
-import os
-import json
 import numpy as np
 import pandas as pd
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+from scipy.stats import pearsonr
+import warnings
 
-from IPython.display import display
-from tqdm import tqdm
+warnings.filterwarnings("ignore")
 
-from collections import Counter, defaultdict
-from typing import List, Dict, Any, Tuple
-
-# Scikit-learn
-from sklearn.model_selection import StratifiedKFold, train_test_split
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler, RobustScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, roc_auc_score, f1_score, matthews_corrcoef
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.calibration import CalibratedClassifierCV
-
-# XGBoost
-import xgboost as xgb
-
-# # 1. Loading and Inspecting the Data
-
-# In[ ]:
-
-
-import json
-import pandas as pd
-import os
-
-# --- Define the path to our data ---
-COMPETITION_NAME = 'fds-pokemon-battles-prediction-2025'
-DATA_PATH = os.path.join('../input', COMPETITION_NAME)
-train_file_path = "/kaggle/input/fds-pokemon-battles-prediction-2025/train.jsonl"
-test_file_path = "/kaggle/input/fds-pokemon-battles-prediction-2025/train.jsonl"
-
-train_data = []
-test_data  = []
-
-# --- Load TRAIN data ---
-print(f"📦 Loading data from '{train_file_path}'...")
-try:
-    with open(train_file_path, 'r') as f:
-        for line in f:
-            train_data.append(json.loads(line))
-    print(f"✅ Successfully loaded {len(train_data)} battles from train.")
-    
-    # Show structure of first train battle
-    if train_data:
-        print("\n--- Structure of the first train battle: ---")
-        first_battle = train_data[0]
-        battle_for_display = first_battle.copy()
-        battle_for_display['battle_timeline'] = first_battle.get('battle_timeline', [])[:2]
-        print(json.dumps(battle_for_display, indent=4))
-        if len(first_battle.get('battle_timeline', [])) > 3:
-            print("    ...")
-            print("    (battle_timeline has been truncated for display)")
-
-except FileNotFoundError:
-    print(f"❌ ERROR: Could not find the training file at '{train_file_path}'.")
-    print("Please make sure you have added the competition data to this notebook.")
-
-
-# --- Load TEST data ---
-print(f"\n📦 Loading data from '{test_file_path}'...")
-try:
-    with open(test_file_path, 'r') as f:
-        for line in f:
-            test_data.append(json.loads(line))
-    print(f"✅ Successfully loaded {len(test_data)} battles from test.")
-    
-    if test_data:
-        print("\n--- Structure of the first test battle: ---")
-        first_test_battle = test_data[0]
-        test_display = first_test_battle.copy()
-        test_display['battle_timeline'] = test_display.get('battle_timeline', [])[:2]
-        print(json.dumps(test_display, indent=4))
-        if len(first_test_battle.get('battle_timeline', [])) > 3:
-            print("    ...")
-            print("    (battle_timeline has been truncated for display)")
-
-except FileNotFoundError:
-    print(f"❌ ERROR: Could not find the test file at '{test_file_path}'.")
-    print("Please make sure you have added the competition data to this notebook.")
 
 
 # # 2. Features Engineering
@@ -2105,11 +2027,174 @@ def _one_record_features(r):
     f.update(extract_battle_progression_features(r))
     f.update(compute_battle_meta_features(r))
     
+   # ---------------------------------------------
+# Global stats (initialized from train_data by the notebook)
+# ---------------------------------------------
+POKEMON_STATS = None
+POKEMON_HP_STATS = None
+pokemon_avg_damage = None
+
+
+def init_pokemon_stats(train_data, alpha: float = 1.0):
+    """
+    Initialize global Pokemon statistics used inside _one_record_features:
+    - Team win-rate stats (POKEMON_STATS)
+    - HP survival stats (POKEMON_HP_STATS)
+    - Average damage stats (pokemon_avg_damage)
+    
+    Must be called in the notebook BEFORE calling create_simple_features().
+    """
+    global POKEMON_STATS, POKEMON_HP_STATS, pokemon_avg_damage
+
+    POKEMON_STATS = build_pokemon_win_stats(train_data, alpha=alpha)
+    POKEMON_HP_STATS = build_pokemon_hp_stats(train_data)
+    pokemon_avg_damage = build_pokemon_avg_damage(train_data)
+
+
+# ---------------------------------------------
+# Full feature set (static + timeline + moves)
+# ---------------------------------------------
+def _one_record_features(r):
+    # Safety check: stats must be initialized from train_data
+    if POKEMON_STATS is None or POKEMON_HP_STATS is None or pokemon_avg_damage is None:
+        raise RuntimeError(
+            "Global stats are not initialized. "
+            "Call init_pokemon_stats(train_data) before creating features."
+        )
+
+    # Static team features
+    t1 = r.get("p1_team_details", []) or []
+    lead = r.get("p2_lead_details", {}) or {}
+    t2 = [lead] if isinstance(lead, dict) and lead else []
+
+    p1sz = len(t1); p2sz = len(t2)
+    p1u  = unique_types(t1); p2u = unique_types(t2)
+    p1s  = sum_stats_of_team(t1); p2s = sum_stats_of_team(t2)
+    p1a  = avg_stats_of_team(t1); p2a = avg_stats_of_team(t2)
+    p2_ls, p2_la = sum_and_avg_of_single(lead) if lead else (0.0, 0.0)
+    p1v  = team_stat_variance(t1)
+
+    f = {
+        "p1_team_size": p1sz, "p2_team_size": p2sz,
+        "p1_unique_types": p1u, "p2_unique_types": p2u,
+        "p1_team_stat_sum": p1s, "p2_team_stat_sum": p2s,
+        "p1_team_stat_avg": p1a, "p2_team_stat_avg": p2a,
+        "diff_team_size": p1sz - p2sz,
+        "diff_unique_types": p1u - p2u,
+        "diff_team_stat_sum": p1s - p2s,
+        "diff_team_stat_avg": p1a - p2a,
+        "p2_lead_stat_sum": p2_ls, "p2_lead_stat_avg": p2_la,
+        "p1_sum_minus_p2_lead_sum": p1s - p2_ls,
+        "p1_avg_minus_p2_lead_avg": p1a - p2_la,
+        "p1_team_stat_var": p1v,
+        "ratio_p1_avg_over_p2_lead_avg": _safe_ratio(p1a, p2_la),
+    }
+
+    # --- Speed advantage vs p2 lead ---
+    p1_mean_spe, p1_max_spe = _team_speed_stats(t1)
+    p2_lead_spe = float(lead.get("base_spe", 0.0)) if lead else 0.0
+
+    faster_cnt = sum(
+        1 for p in t1
+        if isinstance(p.get("base_spe"), (int, float)) and float(p["base_spe"]) > p2_lead_spe
+    )
+    frac_faster = float(faster_cnt) / max(1, len(t1))
+
+    f.update({
+        "p1_mean_spe": p1_mean_spe,
+        "p1_max_spe": p1_max_spe,
+        "p2_lead_spe": p2_lead_spe,
+        "spe_mean_adv": p1_mean_spe - p2_lead_spe,
+        "spe_max_adv":  p1_max_spe - p2_lead_spe,
+        "p1_frac_faster_than_p2lead": frac_faster,
+    })
+
+    # --- Timeline HP features ---
+    tl = get_timeline(r, max_turns=30)
+    p1, p2 = _extract_hp_series(tl)
+    diff = [a - b for a, b in zip(p1, p2)] if p1 and p2 and len(p1) == len(p2) else []
+
+    p1m, p1l, p1s_, p1mn = _mean_last_std_min(p1)
+    p2m, p2l, p2s_, p2mn = _mean_last_std_min(p2)
+    dm, dl, ds, dmn      = _mean_last_std_min(diff)
+
+    f.update({
+        "tl_turns_used": float(len(tl)),
+        "tl_p1_hp_mean": p1m, "tl_p1_hp_last": p1l, "tl_p1_hp_std": p1s_, "tl_p1_hp_min": p1mn,
+        "tl_p2_hp_mean": p2m, "tl_p2_hp_last": p2l, "tl_p2_hp_std": p2s_, "tl_p2_hp_min": p2mn,
+        "tl_hp_diff_mean": dm, "tl_hp_diff_last": dl, "tl_hp_diff_std": ds, "tl_hp_diff_min": dmn,
+        "tl_p1_hp_slope": _slope(p1), "tl_p2_hp_slope": _slope(p2), "tl_hp_diff_slope": _slope(diff),
+        "tl_p1_hp_auc": _auc_pct(p1), "tl_p2_hp_auc": _auc_pct(p2),
+        "tl_frac_turns_advantage": _frac_positive(diff),
+        "tl_p1_status_count": _status_count(tl, "p1"),
+        "tl_p2_status_count": _status_count(tl, "p2"),
+    })
+    f["tl_status_count"] = f["tl_p1_status_count"] + f["tl_p2_status_count"]
+    f["tl_p1_ko_count"]  = _ko_count(p1)
+    f["tl_p2_ko_count"]  = _ko_count(p2)
+    f["tl_ko_count"]     = f["tl_p1_ko_count"] + f["tl_p2_ko_count"]
+
+    # --- Type effectiveness P1 → P2 lead (full / 5 / 10) ---
+    p2_types = lead.get("types") or []
+    if isinstance(p2_types, str):
+        p2_types = [p2_types]
+    p2_types = [t for t in p2_types if t]
+
+    f.update({
+        "ter_p1_vs_p2lead_full": _avg_type_eff_p1_vs_p2lead(tl, p2_types, window=None),
+        "ter_p1_vs_p2lead_5":    _avg_type_eff_p1_vs_p2lead(tl, p2_types, window=5),
+        "ter_p1_vs_p2lead_10":   _avg_type_eff_p1_vs_p2lead(tl, p2_types, window=10),
+    })
+
+    # --- Move-based features (full and early windows) ---
+    mv1 = _move_stats_for_side(tl, "p1", None)
+    mv2 = _move_stats_for_side(tl, "p2", None)
+    f.update(mv1); f.update(mv2)
+    f["mv_power_mean_diff"]   = mv1["mv_p1_power_mean"] - mv2["mv_p2_power_mean"]
+    f["mv_power_mean_ratio"]  = _safe_ratio(mv1["mv_p1_power_mean"], mv2["mv_p2_power_mean"])
+
+    for w in (5, 10):
+        mw1 = _move_stats_for_side(tl, "p1", w)
+        mw2 = _move_stats_for_side(tl, "p2", w)
+        f.update(mw1); f.update(mw2)
+        p1w = mw1.get(f"mv_p1_power_mean_{w}", 0.0)
+        p2w = mw2.get(f"mv_p2_power_mean_{w}", 0.0)
+        f[f"mv_power_mean_diff_{w}"]  = p1w - p2w
+        f[f"mv_power_mean_ratio_{w}"] = _safe_ratio(p1w, p2w)
+        f[f"mv_acc_mean_diff_{w}"]    = mw1.get(f"mv_p1_acc_mean_{w}", 0.0) - mw2.get(f"mv_p2_acc_mean_{w}", 0.0)
+        f[f"mv_priority_mean_diff_{w}"] = mw1.get(f"mv_p1_priority_mean_{w}", 0.0) - mw2.get(f"mv_p2_priority_mean_{w}", 0.0)
+
+    # Lead matchup (damage index) full/5/10
+    f.update(_p1_vs_p2lead_matchup_index(r, tl))
+    
+    # Switch pressure
+    f["switch_p1_count"] = _switch_count(tl, "p1")
+    f["switch_p2_count"] = _switch_count(tl, "p2")
+    f["switch_count_diff"] = f["switch_p1_count"] - f["switch_p2_count"]
+    
+    # Hazards presence
+    f.update(_hazard_flags(tl))
+    
+    # Momentum shift between early/mid
+    f.update(_momentum_shift(tl, t1=3, t2=10))
+    
+    # Recovery pressure
+    f.update(_recovery_pressure(tl))
+
+    # STAB, early momentum, priority block
+    f.update(_stab_features(r, max_turns=30))
+    f.update(_early_momentum_features(r, first_n=3))
+    f.update(_priority_feature_block(r))
+
+    # Battle dynamics
+    f.update(extract_battle_progression_features(r))
+    f.update(compute_battle_meta_features(r))
+    
     # Team Winrate Score
     try:
         p1_team_names = _pnames_from_p1_team(r)
         f["p1_team_winrate_score"] = team_score_from_stats(p1_team_names, POKEMON_STATS, default_wr=0.5)
-    except:
+    except Exception:
         f["p1_team_winrate_score"] = 0.5
         
     # HP Survival Score
@@ -2130,31 +2215,20 @@ def _one_record_features(r):
         f["player_won"] = int(r["player_won"]) if isinstance(r["player_won"], bool) else r["player_won"]
     return f
 
+
 # ---------------------------------------------
 # Public API (same name & return type as starter)
 # ---------------------------------------------
 def create_simple_features(data: list[dict]) -> pd.DataFrame:
-    rows=[]
+    rows = []
     for battle in tqdm(data, desc="Extracting features"):
         rows.append(_one_record_features(battle))
     return pd.DataFrame(rows).fillna(0)
 
+
 # ---------------------------------------------
-# Same output section as the original starter cell
+# Manual interaction features (no data loading here)
 # ---------------------------------------------
-print("Processing training data...")
-train_df = create_simple_features(train_data)
-
-print("\nProcessing test data...")
-test_data = []
-with open(test_file_path, 'r', encoding='utf-8') as f:
-    for line in f:
-        test_data.append(json.loads(line))
-test_df = create_simple_features(test_data)
-
-print("\nTraining features preview:")
-
-# --- Simple manual interactions (robust to missing columns) ---
 def _maybe_add_interactions(df: pd.DataFrame) -> pd.DataFrame:
     def safe_mul(a, b, name):
         if a in df.columns and b in df.columns:
@@ -2188,230 +2262,251 @@ def _maybe_add_interactions(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-train_df = _maybe_add_interactions(train_df)
-test_df  = _maybe_add_interactions(test_df)
-
-train_df_raw = train_df.copy()
-test_df_raw  = test_df.copy()
-
-from sklearn.preprocessing import RobustScaler
-
-# Identify numeric columns
-num_cols = [c for c in train_df.columns if c not in ("battle_id", "player_won")]
-
-# Fit scaler on training numeric features only
-scaler = RobustScaler().fit(train_df[num_cols])
-
-# Apply transformation
-train_df[num_cols] = scaler.transform(train_df[num_cols])
-test_df[num_cols]  = scaler.transform(test_df[num_cols])
-
-print("\nPreview (raw):")
-display(train_df_raw.head())
-
-print("\nScaling completed. Preview (scaled):")
-display(train_df.head())
-
-
-
 # In[6]:
 
 
 # ============================================================================
-# CLUSTERING WITH WIN RATE
+# CLUSTERING WITH WIN RATE (modular version)
 # ============================================================================
-from sklearn.preprocessing import RobustScaler
-import numpy as np
-import pandas as pd
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-import warnings
-warnings.filterwarnings('ignore')
 
-print("\n" + "="*70)
-print(" # CLUSTERING WITH WIN RATE FOR EACH CLUSTER")
-print("="*70)
+def add_cluster_winrate_features(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    k_min: int = 3,
+    k_max: int = 15,
+    sample_size: int = 5000,
+    random_state: int = 42,
+    verbose: bool = True,
+):
+    """
+    Perform KMeans clustering on feature space (excluding 'battle_id' and 'player_won'),
+    compute win rate per cluster on TRAIN, and add the following features:
 
-# -----------------------------------------------------------------------------
-#  Prepare data for clustering
-# -----------------------------------------------------------------------------
+      - 'cluster_id'       : assigned cluster (0..K-1)
+      - 'cluster_win_rate' : empirical win rate of that cluster (TRAIN)
 
-# Columns to exclude
-exclude_cols = ['battle_id', 'player_won']
-feature_cols = [c for c in train_df.columns if c not in exclude_cols]
+    The function:
+      1) Searches for best K in [k_min, k_max] via silhouette score.
+      2) Fits KMeans on train, predicts clusters for train and test.
+      3) Computes cluster_stats (count, wins, win_rate).
+      4) Adds features to copies of train_df and test_df.
+      5) Computes simple quality metrics (correlation + threshold sweep).
 
-# Data for clustering 
-X_train_cluster = train_df[feature_cols].fillna(0).values
-X_test_cluster = test_df[feature_cols].fillna(0).values
-y_train = train_df['player_won'].values
+    Returns:
+      new_train_df, new_test_df, info_dict
+    """
+    # -------------------------------------------------------------------------
+    #  Prepare data for clustering
+    # -------------------------------------------------------------------------
+    exclude_cols = ["battle_id", "player_won"]
+    feature_cols = [c for c in train_df.columns if c not in exclude_cols]
 
-print(f"Features per clustering: {len(feature_cols)}")
-print(f"Samples train: {len(X_train_cluster)}")
-print(f"Samples test: {len(X_test_cluster)}")
+    X_train_cluster = train_df[feature_cols].fillna(0).values
+    X_test_cluster  = test_df[feature_cols].fillna(0).values
+    y_train         = train_df["player_won"].values
 
-# -----------------------------------------------------------------------------
-# Find the optimal number of clusters (Elbow + Silhouette method)
-# -----------------------------------------------------------------------------
+    if verbose:
+        print("\n" + "=" * 70)
+        print(" # CLUSTERING WITH WIN RATE FOR EACH CLUSTER")
+        print("=" * 70)
+        print(f"Features for clustering: {len(feature_cols)}")
+        print(f"Samples train: {len(X_train_cluster)}")
+        print(f"Samples test:  {len(X_test_cluster)}")
 
-from sklearn.metrics import silhouette_score
+    # -------------------------------------------------------------------------
+    #  Find the optimal number of clusters (Elbow + Silhouette approach)
+    # -------------------------------------------------------------------------
+    k_range     = list(range(k_min, k_max + 1))
+    inertias    = []
+    silhouettes = []
 
+    # ensure sample_size does not exceed available samples
+    eff_sample_size = min(sample_size, len(X_train_cluster))
 
-# Test from 3 to 15 clusters
-k_range = range(3, 16)
-inertias = []
-silhouettes = []
+    for k in k_range:
+        kmeans_temp = KMeans(
+            n_clusters=k,
+            random_state=random_state,
+            n_init=10,
+            max_iter=300,
+        )
+        labels_temp = kmeans_temp.fit_predict(X_train_cluster)
+        inertia     = kmeans_temp.inertia_
+        inertias.append(inertia)
 
-for k in k_range:
-    kmeans_temp = KMeans(n_clusters=k, random_state=42, n_init=10, max_iter=300)
-    labels_temp = kmeans_temp.fit_predict(X_train_cluster)
-    inertias.append(kmeans_temp.inertia_)
-    sil_score = silhouette_score(X_train_cluster, labels_temp, sample_size=5000)
-    silhouettes.append(sil_score)
-    print(f"  K={k:2d} | Inertia: {kmeans_temp.inertia_:,.0f} | Silhouette: {sil_score:.4f}")
+        sil_score = silhouette_score(
+            X_train_cluster,
+            labels_temp,
+            sample_size=eff_sample_size,
+        )
+        silhouettes.append(sil_score)
 
-# Find the best K based on Silhouette score
-best_k_idx = np.argmax(silhouettes)
-BEST_K = list(k_range)[best_k_idx]
+        if verbose:
+            print(f"  K={k:2d} | Inertia: {inertia:,.0f} | Silhouette: {sil_score:.4f}")
 
-print(f"\n # Optimal number of clusters: {BEST_K} (Silhouette: {silhouettes[best_k_idx]:.4f})")
+    best_k_idx = int(np.argmax(silhouettes))
+    BEST_K     = k_range[best_k_idx]
 
-# -----------------------------------------------------------------------------
-# Final clustering with optimal K
-# -----------------------------------------------------------------------------
+    if verbose:
+        print(f"\n # Optimal number of clusters: {BEST_K} (Silhouette: {silhouettes[best_k_idx]:.4f})")
 
-print(f"\n Clustering with K={BEST_K}...")
+    # -------------------------------------------------------------------------
+    #  Final clustering with optimal K
+    # -------------------------------------------------------------------------
+    if verbose:
+        print(f"\n Clustering with K={BEST_K}...")
 
-kmeans_final = KMeans(
-    n_clusters=BEST_K, 
-    random_state=42, 
-    n_init=20,  
-    max_iter=500
-)
+    kmeans_final = KMeans(
+        n_clusters=BEST_K,
+        random_state=random_state,
+        n_init=20,
+        max_iter=500,
+    )
 
-# Fit on train and predict on train and test
-train_clusters = kmeans_final.fit_predict(X_train_cluster)
-test_clusters = kmeans_final.predict(X_test_cluster)
+    train_clusters = kmeans_final.fit_predict(X_train_cluster)
+    test_clusters  = kmeans_final.predict(X_test_cluster)
 
-print(f"Clustering completed")
+    if verbose:
+        print("Clustering completed.")
 
-# -----------------------------------------------------------------------------
-# Calculate win rate for each cluster
-# -----------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    #  Calculate win rate for each cluster
+    # -------------------------------------------------------------------------
+    cluster_analysis = pd.DataFrame(
+        {
+            "cluster": train_clusters,
+            "player_won": y_train,
+        }
+    )
 
-print(f"\n Win rate calculation per cluster...")
+    cluster_stats = (
+        cluster_analysis
+        .groupby("cluster")
+        .agg({"player_won": ["count", "sum", "mean"]})
+        .round(4)
+    )
 
-cluster_analysis = pd.DataFrame({
-    'cluster': train_clusters,
-    'player_won': y_train
-})
+    cluster_stats.columns = ["sample_count", "wins", "win_rate"]
+    cluster_stats = cluster_stats.sort_values("win_rate", ascending=False)
 
-cluster_stats = cluster_analysis.groupby('cluster').agg({
-    'player_won': ['count', 'sum', 'mean']
-}).round(4)
+    if verbose:
+        print("\n" + "=" * 70)
+        print(" CLUSTER STATISTICS (sorted by win rate)")
+        print("=" * 70)
+        print(cluster_stats)
+        print("=" * 70)
 
-cluster_stats.columns = ['sample_count', 'wins', 'win_rate']
-cluster_stats = cluster_stats.sort_values('win_rate', ascending=False)
+    # -------------------------------------------------------------------------
+    #  Cluster -> win_rate mapping
+    # -------------------------------------------------------------------------
+    cluster_to_winrate = cluster_stats["win_rate"].to_dict()
 
-print("\n" + "="*70)
-print(" CLUSTER STATISTICS (sorted by win rate)")
-print("="*70)
-print(cluster_stats)
-print("="*70)
+    if verbose:
+        print("\n Cluster-to-Win Rate mapping created:")
+        for cluster_id, wr in sorted(
+            cluster_to_winrate.items(), key=lambda x: x[1], reverse=True
+        ):
+            samples = cluster_stats.loc[cluster_id, "sample_count"]
+            print(f"   Cluster {cluster_id}: {wr:.4f} ({int(samples)} samples)")
 
-# -----------------------------------------------------------------------------
-# Create dictionary cluster -> win_rate
-# -----------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    #  Add features to copies of train_df and test_df
+    # -------------------------------------------------------------------------
+    new_train = train_df.copy()
+    new_test  = test_df.copy()
 
-cluster_to_winrate = cluster_stats['win_rate'].to_dict()
+    new_train["cluster_id"]       = train_clusters
+    new_train["cluster_win_rate"] = new_train["cluster_id"].map(cluster_to_winrate)
 
-print(f"\n Cluster-to-Win Rate mapping created:")
-for cluster_id, wr in sorted(cluster_to_winrate.items(), key=lambda x: x[1], reverse=True):
-    samples = cluster_stats.loc[cluster_id, 'sample_count']
-    print(f"   Cluster {cluster_id}: {wr:.4f} ({int(samples)} samples)")
+    new_test["cluster_id"]        = test_clusters
+    new_test["cluster_win_rate"]  = new_test["cluster_id"].map(cluster_to_winrate)
 
-# -----------------------------------------------------------------------------
-# Add "cluster_win_rate" feature to train and test
-# -----------------------------------------------------------------------------
+    if verbose:
+        print("\n Added 'cluster_id' and 'cluster_win_rate' to train/test DataFrames.")
+        print("\nTRAIN (first 5 rows):")
+        print(new_train[["battle_id", "cluster_id", "cluster_win_rate", "player_won"]].head())
+        print("\nTEST (first 5 rows):")
+        print(new_test[["battle_id", "cluster_id", "cluster_win_rate"]].head())
 
-print(f"\n Added 'cluster_win_rate' feature to the datasets...")
+    # -------------------------------------------------------------------------
+    #  Clustering quality statistics
+    # -------------------------------------------------------------------------
+    if verbose:
+        print("\n" + "=" * 70)
+        print(" CLUSTERING QUALITY METRICS")
+        print("=" * 70)
 
-train_df['cluster_id'] = train_clusters
-train_df['cluster_win_rate'] = train_df['cluster_id'].map(cluster_to_winrate)
+    # correlation cluster_win_rate vs actual win
+    corr, p_value = pearsonr(new_train["cluster_win_rate"], new_train["player_won"])
 
-test_df['cluster_id'] = test_clusters
-test_df['cluster_win_rate'] = test_df['cluster_id'].map(cluster_to_winrate)
+    # baseline accuracy from cluster_win_rate with threshold 0.5
+    thr_default         = 0.5
+    cluster_predictions = (new_train["cluster_win_rate"] >= thr_default).astype(int)
+    acc_default         = (cluster_predictions == new_train["player_won"]).mean()
 
-print(f" Added new feature to train_df")
-print(f" Added new feature to test_df")
+    # threshold tuning
+    thresholds  = np.linspace(0.3, 0.7, 41)
+    acc_values  = []
+    for t in thresholds:
+        preds_t = (new_train["cluster_win_rate"] >= t).astype(int)
+        acc_values.append((preds_t == new_train["player_won"]).mean())
 
-# -----------------------------------------------------------------------------
-# Cluster distribution analysis in the test set
-# -----------------------------------------------------------------------------
+    best_acc = float(max(acc_values))
+    best_thr = float(thresholds[int(np.argmax(acc_values))])
 
-print(f"\n Cluster Distribution on TEST set:")
-test_cluster_dist = pd.Series(test_clusters).value_counts().sort_index()
-for cluster_id, count in test_cluster_dist.items():
-    wr = cluster_to_winrate.get(cluster_id, 0.5)
-    pct = (count / len(test_clusters)) * 100
-    print(f"   Cluster {cluster_id}: {count:4d} samples ({pct:5.2f}%) | Win Rate: {wr:.4f}")
+    winrate_std   = float(cluster_stats["win_rate"].std())
+    winrate_min   = float(cluster_stats["win_rate"].min())
+    winrate_max   = float(cluster_stats["win_rate"].max())
+    winrate_range = winrate_max - winrate_min
 
-# -----------------------------------------------------------------------------
-# Verify new feature
-# -----------------------------------------------------------------------------
+    if verbose:
+        print(f" Cluster Win Rate correlation <-> Actual Win: {corr:.4f} (p={p_value:.4e})")
+        print(f" Accuracy using only Cluster Win Rate @ {thr_default:.2f}: {acc_default:.4f}")
+        print(f" Best accuracy with optimal threshold ({best_thr:.3f}): {best_acc:.4f}")
+        print(f" Win rate variance across clusters: {winrate_std:.4f}")
+        print(f" Range Win Rate: [{winrate_min:.4f}, {winrate_max:.4f}]")
+        print("\n" + "=" * 70)
+        print(" CLUSTERING COMPLETED")
+        print("=" * 70)
+        print("\n New features added:")
+        print(f"  - 'cluster_id': Cluster ID (0 to {BEST_K-1})")
+        print("  - 'cluster_win_rate': Cluster win rate (0.0 to 1.0)")
+        print("=" * 70)
 
-print(f"\n Preview new feature:")
-print("\nTRAIN (first 5 rows):")
-print(train_df[['battle_id', 'cluster_id', 'cluster_win_rate', 'player_won']].head())
+    # -------------------------------------------------------------------------
+    #  Pack debug / analysis info
+    # -------------------------------------------------------------------------
+    info = {
+        "best_k": BEST_K,
+        "k_values": k_range,
+        "inertias": inertias,
+        "silhouettes": silhouettes,
+        "kmeans_model": kmeans_final,
+        "cluster_stats": cluster_stats,
+        "cluster_to_winrate": cluster_to_winrate,
+        "correlation": corr,
+        "correlation_pvalue": p_value,
+        "baseline_threshold": thr_default,
+        "baseline_accuracy": acc_default,
+        "best_threshold": best_thr,
+        "best_threshold_accuracy": best_acc,
+        "winrate_std": winrate_std,
+        "winrate_min": winrate_min,
+        "winrate_max": winrate_max,
+        "winrate_range": winrate_range,
+    }
 
-print("\nTEST (first 5 rows):")
-print(test_df[['battle_id', 'cluster_id', 'cluster_win_rate']].head())
-
-# -----------------------------------------------------------------------------
-# Clustering quality statistics
-# -----------------------------------------------------------------------------
-
-print(f"\n" + "="*70)
-print(" CLUSTERING QUALITY METRICS")
-print("="*70)
-
-# Calculate how cluster_win_rate correlates with the true outcome
-from scipy.stats import pearsonr
-
-correlation, p_value = pearsonr(train_df['cluster_win_rate'], train_df['player_won'])
-print(f" Cluster Win Rate correlation <-> Actual Win: {correlation:.4f} (p={p_value:.4e})")
-
-# Calculate the accuracy if we used only the cluster_win_rate
-threshold = 0.5
-cluster_predictions = (train_df['cluster_win_rate'] >= threshold).astype(int)
-cluster_accuracy = (cluster_predictions == train_df['player_won']).mean()
-print(f" Accuracy using only Cluster Win Rate @ 0.5: {cluster_accuracy:.4f}")
-
-# Find the best threshold
-thresholds = np.linspace(0.3, 0.7, 41)
-accuracies = [(train_df['cluster_win_rate'] >= t).astype(int) == train_df['player_won'] 
-              for t in thresholds]
-best_acc = max([acc.mean() for acc in accuracies])
-best_thr = thresholds[np.argmax([acc.mean() for acc in accuracies])]
-print(f" Best accuracy with optimal threshold ({best_thr:.3f}): {best_acc:.4f}")
-
-# Variance of win rates across clusters
-winrate_std = cluster_stats['win_rate'].std()
-winrate_range = cluster_stats['win_rate'].max() - cluster_stats['win_rate'].min()
-print(f" Win rate variance across clusters: {winrate_std:.4f}")
-print(f" Range Win Rate: [{cluster_stats['win_rate'].min():.4f}, {cluster_stats['win_rate'].max():.4f}]")
-
-print("\n" + "="*70)
-print(" CLUSTERING COMPLETED")
-print("="*70)
-print("\n The new features have been added:")
-print("  - 'cluster_id': Cluster ID (0 a {})".format(BEST_K-1))
-print("  - 'cluster_win_rate': Cluster win rate (0.0 a 1.0)")
-print("="*70)
-
+    return new_train, new_test, info
 
 # ## 2.A Overfitting check
 
 # In[7]:
+
+from sklearn.model_selection import StratifiedKFold, learning_curve
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from IPython.display import display
 
 
 # === Cell A: overfitting diagnostics (learning curve) ===
@@ -2424,29 +2519,58 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 
+# ============================================================================
+# 2.A Overfitting diagnostics (learning curve)
+# ============================================================================
+
 def diagnose_overfitting(
-    X, y,
+    X,
+    y,
     cv_splits: int = 5,
     train_sizes = np.linspace(0.1, 1.0, 6),
     random_state: int = 42,
     max_iter: int = 1000,
-    plot: bool = True
+    plot: bool = True,
+    verbose: bool = True,
 ):
     """
-    Computes a learning curve for a Logistic Regression pipeline (Scaler + Logistic).
-    Returns a dict with summary stats and optionally plots train vs validation accuracy.
+    Compute a learning curve for a Logistic Regression pipeline (Scaler + Logistic).
+    Returns a dict with summary statistics and optionally plots train vs validation accuracy.
+
+    Parameters
+    ----------
+    X : array-like, shape (n_samples, n_features)
+        Training features.
+    y : array-like, shape (n_samples,)
+        Binary target (0/1).
+    cv_splits : int
+        Number of StratifiedKFold splits.
+    train_sizes : array-like
+        Fractions of the training set used to build the learning curve.
+    random_state : int
+        Random seed for reproducibility.
+    max_iter : int
+        Max iterations for Logistic Regression.
+    plot : bool
+        If True, plot the learning curve.
+    verbose : bool
+        If True, print summary info and show the table.
     """
     pipe = Pipeline([
         ("scaler", StandardScaler()),
         ("clf", LogisticRegression(max_iter=max_iter, random_state=random_state))
     ])
 
-    cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
+    cv = StratifiedKFold(
+        n_splits=cv_splits,
+        shuffle=True,
+        random_state=random_state
+    )
 
-    # learning_curve supports shuffle/random_state in recent sklearn versions
     ts_abs, train_scores, val_scores = learning_curve(
         estimator=pipe,
-        X=X, y=y,
+        X=X,
+        y=y,
         train_sizes=train_sizes,
         cv=cv,
         scoring="accuracy",
@@ -2460,7 +2584,6 @@ def diagnose_overfitting(
     val_mean   = val_scores.mean(axis=1)
     val_std    = val_scores.std(axis=1)
 
-    # Table view
     df_lc = pd.DataFrame({
         "train_size": ts_abs,
         "train_acc_mean": train_mean,
@@ -2469,18 +2592,20 @@ def diagnose_overfitting(
         "val_acc_std": val_std,
         "gap_train_minus_val": train_mean - val_mean
     })
-    display(df_lc)
 
-    # Simple decision rule for potential overfitting (gap at largest size)
+    if verbose:
+        display(df_lc)
+
     gap_last = float(df_lc["gap_train_minus_val"].iloc[-1])
     val_last = float(df_lc["val_acc_mean"].iloc[-1])
     flag_overfit = (gap_last >= 0.05) and (val_last < 0.80 or gap_last > 0.07)
 
-    print(f"\nLargest train size = {int(ts_abs[-1])}")
-    print(f"  • Train acc (mean): {train_mean[-1]:.4f}")
-    print(f"  • Val   acc (mean): {val_mean[-1]:.4f}")
-    print(f"  • Gap (train - val): {gap_last:.4f}")
-    print(f"\nPotential overfitting: {'YES' if flag_overfit else 'NO'}")
+    if verbose:
+        print(f"\nLargest train size = {int(ts_abs[-1])}")
+        print(f"  • Train acc (mean): {train_mean[-1]:.4f}")
+        print(f"  • Val   acc (mean): {val_mean[-1]:.4f}")
+        print(f"  • Gap (train - val): {gap_last:.4f}")
+        print(f"\nPotential overfitting: {'YES' if flag_overfit else 'NO'}")
 
     if plot:
         plt.figure()
@@ -2501,44 +2626,99 @@ def diagnose_overfitting(
         "val_acc_mean": val_mean,
         "gap_last": gap_last,
         "val_last": val_last,
-        "overfitting_flag": flag_overfit
+        "overfitting_flag": flag_overfit,
+        "learning_curve_table": df_lc
     }
 
-# --- How to call (run after Cell 2) ---
-features = [c for c in train_df.columns if c not in ("battle_id", "player_won")]
-X = train_df[features].values
-y = train_df["player_won"].values
-_ = diagnose_overfitting(X, y, cv_splits=5, max_iter=1000, plot=True)
 
 
-# # 3. Models Training
+# ============================================================================
+# 3. Simple Logistic Regression baseline (no stacking)
+# ============================================================================
 
-# In[8]:
+def train_logreg_baseline(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    random_state: int = 42,
+    max_iter: int = 3000,
+    verbose: bool = True,
+):
+    """
+    Train a simple Logistic Regression on all features (excluding 'battle_id' and 'player_won').
+
+    Parameters
+    ----------
+    train_df : pd.DataFrame
+        Training DataFrame with columns 'battle_id', 'player_won' and features.
+    test_df : pd.DataFrame
+        Test DataFrame with 'battle_id' and the same features as train_df (except 'player_won').
+    random_state : int
+        Random seed for Logistic Regression.
+    max_iter : int
+        Max iterations for Logistic Regression.
+    verbose : bool
+        If True, print basic logs.
+
+    Returns
+    -------
+    model : fitted LogisticRegression
+    test_proba : np.ndarray, shape (n_test_samples,)
+        Predicted probabilities P(y=1) for the test set.
+    features : list[str]
+        List of feature column names used for training.
+    """
+    # Define feature columns
+    features = [col for col in train_df.columns if col not in ["battle_id", "player_won"]]
+
+    X_train = train_df[features].values
+    y_train = train_df["player_won"].values
+    X_test  = test_df[features].values
+
+    model = LogisticRegression(
+        random_state=random_state,
+        max_iter=max_iter,
+    )
+
+    if verbose:
+        print("\n" + "=" * 70)
+        print(" Training a simple Logistic Regression baseline (Model 1)")
+        print("=" * 70)
+        print(f"Number of features: {len(features)}")
+        print(f"Train samples:      {X_train.shape[0]}")
+        print(f"Test samples:       {X_test.shape[0]}")
+
+    model.fit(X_train, y_train)
+
+    if verbose:
+        print("Model training complete.")
+
+    # Predicted probabilities for class 1
+    test_proba = model.predict_proba(X_test)[:, 1]
+
+    return model, test_proba, features
 
 
-from sklearn.linear_model import LogisticRegression
+# ============================================================================
+# 3. Feature selection + base models + stacking ensemble (Model 1)
+# ============================================================================
 
-# Define our features (X) and target (y)
-features = [col for col in train_df.columns if col not in ['battle_id', 'player_won']]
-X_train = train_df[features]
-y_train = train_df['player_won']
-
-X_test = test_df[features]
-
-# Initialize and train the model
-print("Training a simple Logistic Regression model...")
-model = LogisticRegression(random_state=42, max_iter=3000)
-model.fit(X_train, y_train)
-print("Model training complete.")
-
-
-# ## 3.2 Best-features selection
-
-# In[9]:
-
+import warnings
+warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
+
+from sklearn.model_selection import (
+    train_test_split,
+    StratifiedKFold,
+    cross_val_score,
+)
+from sklearn.metrics import accuracy_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.ensemble import RandomForestClassifier
+import xgboost as xgb
+
 
 def drop_high_correlation(df: pd.DataFrame, threshold: float = 0.92):
     """
@@ -2548,7 +2728,7 @@ def drop_high_correlation(df: pd.DataFrame, threshold: float = 0.92):
     num = df.select_dtypes(include=[np.number]).copy()
     num = num.replace([np.inf, -np.inf], np.nan)
 
-    # drop constants
+    # Drop constants
     const_mask = num.nunique(dropna=True) <= 1
     dropped_constants = list(num.columns[const_mask])
     num = num.drop(columns=dropped_constants)
@@ -2562,9 +2742,8 @@ def drop_high_correlation(df: pd.DataFrame, threshold: float = 0.92):
     to_drop = []
     cols = corr.columns.to_list()
     for i in range(len(cols)):
-        for j in range(i+1, len(cols)):
+        for j in range(i + 1, len(cols)):
             if upper[i, j] and corr.iat[i, j] > threshold:
-                # drop the j-th feature (arbitrary but consistent)
                 col_j = cols[j]
                 if col_j not in to_drop:
                     to_drop.append(col_j)
@@ -2572,389 +2751,550 @@ def drop_high_correlation(df: pd.DataFrame, threshold: float = 0.92):
     reduced = df.drop(columns=set(dropped_constants) | set(to_drop), errors="ignore")
     return reduced, to_drop, dropped_constants
 
-# --- Apply to TRAIN (features only) and align TEST ---
-features_only = train_df.drop(columns=["battle_id", "player_won"]).copy()
-train_reduced, dropped_corr, dropped_const = drop_high_correlation(features_only, threshold=0.92)
-test_reduced  = test_df[train_reduced.columns].copy()
 
-print(f"Feature count before: {features_only.shape[1]}")
-print(f"Removed constants   : {len(dropped_const)}")
-print(f"Removed by corr     : {len(dropped_corr)}  (thr=0.92)")
-print(f"Feature count after : {train_reduced.shape[1]}")
+def run_feature_selection_and_stacking(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    corr_threshold: float = 0.92,
+    l1_coef_threshold: float = 0.003,
+    random_state: int = 42,
+    verbose: bool = True,
+):
+    """
+    Full Model 1 training pipeline:
+    - Correlation & constant-feature pruning
+    - L1 Logistic feature selection
+    - KNN, Random Forest, XGBoost (CV-tuned hyperparameters)
+    - Stacking ensemble (LogL1 + RF + KNN + XGB → Logistic meta)
+    
+    Parameters
+    ----------
+    train_df : pd.DataFrame
+        Training dataframe containing 'battle_id', 'player_won' and features.
+    test_df : pd.DataFrame
+        Test dataframe containing 'battle_id' and the same features.
+    corr_threshold : float
+        Correlation threshold for feature pruning.
+    l1_coef_threshold : float
+        Threshold on |coef| to keep features from the L1 logistic.
+    random_state : int
+        Seed for reproducibility.
+    verbose : bool
+        If True, prints detailed logs.
+    
+    Returns
+    -------
+    results : dict
+        {
+          "train_reduced": train_reduced,
+          "test_reduced": test_reduced,
+          "feature_cols_after_corr": [...],
+          "dropped_by_corr": [...],
+          "dropped_constants": [...],
+          "selected_features": [...],
+          "X_train_sel": X_train_sel,
+          "X_test_sel": X_test_sel,
+          "y": y,  # pandas Series
+          "knn_best": knn_best,
+          "rf_best": rf_best,
+          "xgb_clf": xgb_clf,
+          "log_l1": log_l1,
+          "meta": meta,
+          "stack_train_oof": stack_train,         # OOF meta-input
+          "stack_train_scores": stack_train_scores,
+          "stack_test_proba": stack_pred_scores,  # P(y=1) on test
+          "stack_test_labels": stack_pred_labels, # hard labels on test
+          "cv": {
+              "l1_cv_acc_mean": float(cv_acc.mean()),
+              "l1_cv_acc_std": float(cv_acc.std()),
+              "knn_cv_scores": knn_cv_scores,
+              "rf_cv_scores": rf_cv_scores,
+              "xgb_cv_acc": float(xgb_acc),
+          },
+        }
+    """
+
+    if verbose:
+        print("\n" + "=" * 70)
+        print(" 3.2–3.8 Feature selection + base models + stacking (Model 1)")
+        print("=" * 70)
+
+    # -------------------------------------------------------------------------
+    # 1) Correlation pruning (3.2 Best-features selection)
+    # -------------------------------------------------------------------------
+    exclude_cols = ["battle_id", "player_won"]
+    features_only = train_df.drop(columns=exclude_cols).copy()
+
+    train_reduced, dropped_corr, dropped_const = drop_high_correlation(
+        features_only, threshold=corr_threshold
+    )
+
+    # Align test on the same columns (safe reindex)
+    test_reduced = test_df.reindex(columns=train_reduced.columns, fill_value=0).copy()
+
+    if verbose:
+        print(f"Feature count before: {features_only.shape[1]}")
+        print(f"Removed constants   : {len(dropped_const)}")
+        print(f"Removed by corr     : {len(dropped_corr)}  (thr={corr_threshold})")
+        print(f"Feature count after : {train_reduced.shape[1]}")
+
+    # -------------------------------------------------------------------------
+    # 2) L1 Logistic + feature selection (3.3 + 3.4)
+    # -------------------------------------------------------------------------
+    X_for_l1 = train_reduced.copy()
+    y = train_df["player_won"].astype(int).copy()  # pandas Series
+
+    if verbose:
+        print("\nEvaluating Logistic Regression with L1 regularization...")
+
+    X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
+        X_for_l1,
+        y,
+        test_size=0.2,
+        random_state=random_state,
+        stratify=y,
+    )
+
+    logreg_l1 = LogisticRegression(
+        penalty="l1",
+        solver="liblinear",
+        max_iter=5000,
+        random_state=random_state,
+        class_weight="balanced",
+    )
+
+    logreg_l1.fit(X_train_split, y_train_split)
+    y_val_pred = logreg_l1.predict(X_val_split)
+    acc_val = accuracy_score(y_val_split, y_val_pred)
+
+    if verbose:
+        print(f"Validation Accuracy (L1): {acc_val:.4f}")
+
+    best_logreg = logreg_l1
+
+    # --- 3.4 L1-based feature selection + retraining ---
+    coef = best_logreg.coef_[0]
+    abs_coef = np.abs(coef)
+
+    keep_mask = abs_coef > l1_coef_threshold
+    selected_features = list(train_reduced.columns[keep_mask])
+
+    if verbose:
+        print(
+            f"[L1 selection] kept {len(selected_features)} / "
+            f"{len(train_reduced.columns)} features (threshold={l1_coef_threshold})"
+        )
+
+    X_train_sel = train_reduced[selected_features].copy()
+    X_test_sel = test_reduced.reindex(columns=selected_features, fill_value=0).copy()
+
+    model_final = LogisticRegression(
+        penalty="l1",
+        solver="liblinear",
+        C=0.4,
+        max_iter=3000,
+        random_state=random_state,
+    )
+
+    cv_acc = cross_val_score(
+        model_final,
+        X_train_sel,
+        y,
+        cv=5,
+        scoring="accuracy",
+        n_jobs=-1,
+    )
+
+    if verbose:
+        print(
+            f"[L1 selection] 5-fold CV accuracy: "
+            f"{cv_acc.mean():.4f} ± {cv_acc.std():.4f}"
+        )
+
+    model_final.fit(X_train_sel, y)
+
+    # L1-based model & matrices for potential reuse
+    l1_selected_model = model_final
+
+    # -------------------------------------------------------------------------
+    # 3) KNN: best K by CV (3.5)
+    # -------------------------------------------------------------------------
+    if verbose:
+        print("\n[3.5] KNN: K selection with CV...")
+
+    X_knn_rf_xgb = train_reduced.copy()  # uses features after corr-pruning
+    y_knn_rf_xgb = y
+
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)
+
+    candidate_k = [3, 5, 7, 9, 11, 13, 15, 17, 21, 25, 31]
+    knn_cv_scores = {}
+    for k in candidate_k:
+        knn = KNeighborsClassifier(n_neighbors=k)
+        acc = cross_val_score(
+            knn, X_knn_rf_xgb, y_knn_rf_xgb, cv=cv, scoring="accuracy", n_jobs=-1
+        ).mean()
+        knn_cv_scores[k] = acc
+
+    best_k = max(knn_cv_scores, key=knn_cv_scores.get)
+    if verbose:
+        print(
+            "KNN CV accuracies:",
+            {k: round(v, 4) for k, v in knn_cv_scores.items()},
+        )
+        print(f"Best K = {best_k} (CV acc={knn_cv_scores[best_k]:.4f})")
+
+    knn_best = KNeighborsClassifier(n_neighbors=best_k)
+    knn_best.fit(X_knn_rf_xgb, y_knn_rf_xgb)
+    knn_test_proba = knn_best.predict_proba(test_reduced)[:, 1]
+
+    # -------------------------------------------------------------------------
+    # 4) Random Forest shallow vs deep (3.6)
+    # -------------------------------------------------------------------------
+    if verbose:
+        print("\n[3.6] Random Forest shallow vs deep via CV...")
+
+    rf_configs = {
+        "shallow": RandomForestClassifier(
+            n_estimators=400,
+            max_depth=8,
+            min_samples_split=4,
+            min_samples_leaf=2,
+            max_features="sqrt",
+            random_state=random_state,
+            n_jobs=-1,
+        ),
+        "deep": RandomForestClassifier(
+            n_estimators=600,
+            max_depth=None,
+            min_samples_split=2,
+            min_samples_leaf=1,
+            max_features="sqrt",
+            random_state=random_state,
+            n_jobs=-1,
+        ),
+    }
+
+    rf_cv_scores = {}
+    for name, rf_model in rf_configs.items():
+        acc = cross_val_score(
+            rf_model,
+            X_knn_rf_xgb,
+            y_knn_rf_xgb,
+            cv=cv,
+            scoring="accuracy",
+            n_jobs=-1,
+        ).mean()
+        rf_cv_scores[name] = acc
+
+    best_rf_name = max(rf_cv_scores, key=rf_cv_scores.get)
+    rf_best = rf_configs[best_rf_name]
+
+    if verbose:
+        print(
+            "RF CV accuracies:",
+            {k: round(v, 4) for k, v in rf_cv_scores.items()},
+        )
+        print(
+            f"Best RF = {best_rf_name} "
+            f"(CV acc={rf_cv_scores[best_rf_name]:.4f})"
+        )
+
+    rf_best.fit(X_knn_rf_xgb, y_knn_rf_xgb)
+    rf_test_proba = rf_best.predict_proba(test_reduced)[:, 1]
+
+    # -------------------------------------------------------------------------
+    # 5) XGBoost (3.7)
+    # -------------------------------------------------------------------------
+    if verbose:
+        print("\n[3.7] XGBoost with CV...")
+
+    xgb_clf = xgb.XGBClassifier(
+        n_estimators=600,
+        max_depth=5,
+        learning_rate=0.05,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        reg_lambda=1.0,
+        reg_alpha=0.0,
+        objective="binary:logistic",
+        eval_metric="logloss",
+        random_state=random_state,
+        tree_method="hist",
+        n_jobs=-1,
+    )
+
+    xgb_acc = cross_val_score(
+        xgb_clf,
+        X_knn_rf_xgb,
+        y_knn_rf_xgb,
+        cv=cv,
+        scoring="accuracy",
+        n_jobs=-1,
+    ).mean()
+
+    if verbose:
+        print(f"XGB CV accuracy: {xgb_acc:.4f}")
+
+    xgb_clf.fit(X_knn_rf_xgb, y_knn_rf_xgb)
+    xgb_test_proba = xgb_clf.predict_proba(test_reduced)[:, 1]
+
+    # -------------------------------------------------------------------------
+    # 6) Stacking ensemble (3.8)
+    # -------------------------------------------------------------------------
+    if verbose:
+        print("\n[3.8] Stacking ensemble (LogL1 + RF + KNN + XGB → Logistic meta)...")
+
+    # Base 1: Logistic L1 on corr-pruned features
+    log_l1 = LogisticRegression(
+        penalty="l1",
+        solver="liblinear",
+        max_iter=2000,
+        random_state=random_state,
+    )
+
+    X_stack = X_knn_rf_xgb
+    y_stack = y_knn_rf_xgb
+
+    oof_log = np.zeros(len(X_stack))
+    oof_rf = np.zeros(len(X_stack))
+    oof_knn = np.zeros(len(X_stack))
+    oof_xgb = np.zeros(len(X_stack))
+
+    for tr_idx, va_idx in cv.split(X_stack, y_stack):
+        X_tr, X_va = X_stack.iloc[tr_idx], X_stack.iloc[va_idx]
+        y_tr = y_stack.iloc[tr_idx]
+
+        # Fit base models on fold
+        log_l1.fit(X_tr, y_tr)
+        rf_best.fit(X_tr, y_tr)
+        knn_best.fit(X_tr, y_tr)
+        xgb_clf.fit(X_tr, y_tr)
+
+        # OOF predictions
+        oof_log[va_idx] = log_l1.predict_proba(X_va)[:, 1]
+        oof_rf[va_idx] = rf_best.predict_proba(X_va)[:, 1]
+        oof_knn[va_idx] = knn_best.predict_proba(X_va)[:, 1]
+        oof_xgb[va_idx] = xgb_clf.predict_proba(X_va)[:, 1]
+
+    stack_train = np.vstack([oof_log, oof_rf, oof_knn, oof_xgb]).T
+
+    meta = LogisticRegression(
+        penalty="l2",
+        C=1.0,
+        max_iter=2000,
+        random_state=random_state,
+    )
+    meta.fit(stack_train, y_stack)
+
+    # Refit base models on ALL training data
+    log_l1.fit(X_stack, y_stack)
+    rf_best.fit(X_stack, y_stack)
+    knn_best.fit(X_stack, y_stack)
+    xgb_clf.fit(X_stack, y_stack)
+
+    # Test meta-input
+    log_test = log_l1.predict_proba(test_reduced)[:, 1]
+    rf_test = rf_best.predict_proba(test_reduced)[:, 1]
+    knn_test = knn_best.predict_proba(test_reduced)[:, 1]
+    xgb_test = xgb_clf.predict_proba(test_reduced)[:, 1]
+
+    stack_test = np.vstack([log_test, rf_test, knn_test, xgb_test]).T
+    stack_pred_labels = meta.predict(stack_test)
+    stack_pred_scores = meta.predict_proba(stack_test)[:, 1]
+
+    # Training-side scores from meta (useful for threshold tuning)
+    stack_train_scores = meta.predict_proba(stack_train)[:, 1]
+
+    if verbose:
+        print("✅ Stacking (LogL1 + RF + KNN + XGB → Logistic meta) ready.")
+
+    results = {
+        "train_reduced": train_reduced,
+        "test_reduced": test_reduced,
+        "feature_cols_after_corr": list(train_reduced.columns),
+        "dropped_by_corr": dropped_corr,
+        "dropped_constants": dropped_const,
+        "selected_features": selected_features,
+        "X_train_sel": X_train_sel,
+        "X_test_sel": X_test_sel,
+        "y": y,  # pandas Series
+        "knn_best": knn_best,
+        "rf_best": rf_best,
+        "xgb_clf": xgb_clf,
+        "log_l1": log_l1,
+        "l1_selected_model": l1_selected_model,
+        "meta": meta,
+        "stack_train_oof": stack_train,
+        "stack_train_scores": stack_train_scores,
+        "stack_test_proba": stack_pred_scores,
+        "stack_test_labels": stack_pred_labels,
+        "cv": {
+            "l1_cv_acc_mean": float(cv_acc.mean()),
+            "l1_cv_acc_std": float(cv_acc.std()),
+            "knn_cv_scores": knn_cv_scores,
+            "rf_cv_scores": rf_cv_scores,
+            "xgb_cv_acc": float(xgb_acc),
+        },
+    }
+
+    return results
 
 
+# ============================================================================
+# 3.9 Threshold tuning + 4. Submission (Model 1)
+# ============================================================================
 
-# ## 3.3 Logistic Regression, with L1 penalization
-
-# In[10]:
-
-
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
-
-print("Evaluating Logistic Regression with L1 regularization...")
-
-X = train_reduced
-y = train_df["player_won"]
-
-X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
-)
-
-logreg_l1 = LogisticRegression(penalty='l1', solver='liblinear', max_iter=5000,
-                               random_state=42, class_weight='balanced')
-
-logreg_l1.fit(X_train_split, y_train_split)
-y_val_pred = logreg_l1.predict(X_val_split)
-acc_val = accuracy_score(y_val_split, y_val_pred)
-
-print(f"Validation Accuracy (L1): {acc_val:.4f}")
-
-best_logreg = logreg_l1
-
-
-# ## 3.4- Keep only important features (based on L1 penalization)
-
-# In[11]:
-
-
-# === 3.4 — L1-based feature selection + retrain (keeps notebook API intact) ===
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import cross_val_score
-from sklearn.linear_model import LogisticRegression
-
-# y from original training frame (label stays out of any scaling/selection)
-y = train_df["player_won"].values
-
-# 1) Take absolute coefficients from the L1 model fitted in Cell 3.3
-coef = best_logreg.coef_[0]
-abs_coef = np.abs(coef)
-
-# 2) Keep only features with non-trivial weight
-#    You can nudge this threshold; 0.002–0.006 often works well.
-thr = 0.003
-keep_mask = abs_coef > thr
-selected_features = list(train_reduced.columns[keep_mask])
-
-print(f"[L1 selection] kept {len(selected_features)} / {len(train_reduced.columns)} features "
-      f"(threshold={thr})")
-
-# 3) Slice train/test with the selected columns (safe reindex for test)
-X_train_sel = train_reduced[selected_features].copy()
-X_test_sel  = test_reduced.reindex(columns=selected_features, fill_value=0).copy()
-
-# 4) Retrain a slightly stronger-regularized L1 model on the selected features
-#    (lower C => stronger sparsity; small boost against noise)
-model_final = LogisticRegression(
-    penalty="l1",
-    solver="liblinear",
-    C=0.4,             # try 0.6 / 0.4 / 0.3 if you want tiny extra tweaks
-    max_iter=3000,
-    random_state=42
-)
-cv_acc = cross_val_score(model_final, X_train_sel, y, cv=5, scoring="accuracy")
-print(f"[L1 selection] 5-fold CV accuracy: {cv_acc.mean():.4f} ± {cv_acc.std():.4f}")
-
-model_final.fit(X_train_sel, y)
-
-# 5) Keep notebook contract: downstream cells expect `model` and `features`
-model = model_final
-features = selected_features
-
-# (Optional) quick sanity check on dimensions
-print("Train shape:", X_train_sel.shape, "| Test shape:", X_test_sel.shape)
-
-# 6) Also expose reduced matrices in case you want to reuse them explicitly
-train_selected = X_train_sel
-test_selected  = X_test_sel
-
-
-# ## 3.5 KNN- "k" selection with CV
-
-# In[12]:
-
-
-# === 3.5 KNN: pick K by CV ===
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.model_selection import StratifiedKFold, cross_val_score
-import numpy as np
-
-X = train_reduced
-y = train_df["player_won"]
-
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-candidate_k = [3,5,7,9,11,13,15,17,21,25,31]
-scores = {}
-for k in candidate_k:
-    knn = KNeighborsClassifier(n_neighbors=k)
-    acc = cross_val_score(knn, X, y, cv=cv, scoring="accuracy", n_jobs=-1).mean()
-    scores[k] = acc
-best_k = max(scores, key=scores.get)
-print("KNN CV accuracies:", {k: round(v,4) for k,v in scores.items()})
-print(f"Best K = {best_k} (CV acc={scores[best_k]:.4f})")
-
-knn_best = KNeighborsClassifier(n_neighbors=best_k)
-knn_best.fit(X, y)
-knn_test_proba = knn_best.predict_proba(test_reduced)[:,1]
-
-
-# ## 3.6 Random Forest: shallow vs deep via CV
-
-# In[13]:
-
-
-# === 3.6 Random Forest: shallow vs deep via CV ===
-from sklearn.ensemble import RandomForestClassifier
-
-rf_configs = {
-    "shallow": RandomForestClassifier(
-        n_estimators=400, max_depth=8, min_samples_split=4, min_samples_leaf=2,
-        max_features="sqrt", random_state=42, n_jobs=-1
-    ),
-    "deep": RandomForestClassifier(
-        n_estimators=600, max_depth=None, min_samples_split=2, min_samples_leaf=1,
-        max_features="sqrt", random_state=42, n_jobs=-1
-    ),
-}
-rf_cv_scores = {}
-for name, model in rf_configs.items():
-    acc = cross_val_score(model, X, y, cv=cv, scoring="accuracy", n_jobs=-1).mean()
-    rf_cv_scores[name] = acc
-best_rf_name = max(rf_cv_scores, key=rf_cv_scores.get)
-print("RF CV accuracies:", {k: round(v,4) for k,v in rf_cv_scores.items()})
-print(f"Best RF = {best_rf_name} (CV acc={rf_cv_scores[best_rf_name]:.4f})")
-
-rf_best = rf_configs[best_rf_name]
-rf_best.fit(X, y)
-rf_test_proba = rf_best.predict_proba(test_reduced)[:,1]
-
-
-# ## 3.7- XGBoost
-# 
-
-# In[14]:
-
-
-# === 3.7 XGBoost (accuracy via CV) ===
-import xgboost as xgb
-
-xgb_clf = xgb.XGBClassifier(
-    n_estimators=600,
-    max_depth=5,
-    learning_rate=0.05,
-    subsample=0.9,
-    colsample_bytree=0.9,
-    reg_lambda=1.0,
-    reg_alpha=0.0,
-    objective="binary:logistic",
-    eval_metric="logloss",
-    random_state=42,
-    tree_method="hist",           
-    n_jobs=-1
-)
-
-xgb_acc = cross_val_score(xgb_clf, X, y, cv=cv, scoring="accuracy", n_jobs=-1).mean()
-print(f"XGB CV accuracy: {xgb_acc:.4f}")
-
-xgb_clf.fit(X, y)
-xgb_test_proba = xgb_clf.predict_proba(test_reduced)[:,1]
-
-
-# ## 3.8 - Stacking Ensemble (OOF clean)
-# 
-
-# In[15]:
-
-
-# === 3.8 Stacking Ensemble (OOF clean) ===
-from sklearn.linear_model import LogisticRegression
-import numpy as np
-
-# Base 1: Logistic L1
-log_l1 = LogisticRegression(penalty='l1', solver='liblinear', max_iter=2000, random_state=42)
-
-# OOF containers
-oof_log = np.zeros(len(X))
-oof_rf  = np.zeros(len(X))
-oof_knn = np.zeros(len(X))
-oof_xgb = np.zeros(len(X))
-
-for tr_idx, va_idx in cv.split(X, y):
-    X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
-    y_tr       = y.iloc[tr_idx]
-
-    # Fit on fold
-    log_l1.fit(X_tr, y_tr)
-    rf_best.fit(X_tr, y_tr)
-    knn_best.fit(X_tr, y_tr)
-    xgb_clf.fit(X_tr, y_tr)
-
-    # OOF preds
-    oof_log[va_idx] = log_l1.predict_proba(X_va)[:,1]
-    oof_rf[va_idx]  = rf_best.predict_proba(X_va)[:,1]
-    oof_knn[va_idx] = knn_best.predict_proba(X_va)[:,1]
-    oof_xgb[va_idx] = xgb_clf.predict_proba(X_va)[:,1]
-
-# Meta-training set = OOF concatenation
-stack_train = np.vstack([oof_log, oof_rf, oof_knn, oof_xgb]).T
-
-# Meta-learner: Logistic
-meta = LogisticRegression(penalty='l2', C=1.0, max_iter=2000, random_state=42)
-meta.fit(stack_train, y)
-
-# Fit base models on ALL data per test
-log_l1.fit(X, y)
-rf_best.fit(X, y)
-knn_best.fit(X, y)
-xgb_clf.fit(X, y)
-
-# Test meta-input
-log_test = log_l1.predict_proba(test_reduced)[:,1]
-rf_test  = rf_best.predict_proba(test_reduced)[:,1]
-knn_test = knn_best.predict_proba(test_reduced)[:,1]
-xgb_test = xgb_clf.predict_proba(test_reduced)[:,1]
-
-stack_test = np.vstack([log_test, rf_test, knn_test, xgb_test]).T
-stack_pred_labels = meta.predict(stack_test)       
-stack_pred_scores = meta.predict_proba(stack_test)[:,1]  
-print("✅ Stacking (LogL1 + RF + KNN + XGB → Logistic meta) pronto.")
-
-
-# ## 3.9 - Threshold tuning (on OOF for the stacking meta-model)
-
-# In[16]:
-
-
-# === 3.9 Threshold tuning (on OOF for the stacking meta-model) ===
-import numpy as np
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import accuracy_score
 from sklearn.linear_model import LogisticRegression
 
-# Safety checks
-for var in ["stack_train", "stack_test", "y", "meta"]:
-    if var not in globals():
-        raise RuntimeError(f"Variable '{var}' is missing. Run the stacking cell (3.8) first.")
 
-# Build OOF probabilities for the meta-learner to tune threshold without bias
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-oof_meta_scores = np.zeros(len(stack_train))
+def tune_threshold_and_build_submission(
+    stack_train_oof: np.ndarray,
+    y,
+    test_scores: np.ndarray,
+    battle_ids,
+    th_min: float = 0.30,
+    th_max: float = 0.70,
+    th_step: float = 0.005,
+    n_splits: int = 5,
+    random_state: int = 42,
+    save_path: str | None = "/kaggle/working/submission.csv",
+    verbose: bool = True,
+):
+    """
+    Threshold tuning for the stacking meta-model + submission creation.
 
-for tr_idx, va_idx in cv.split(stack_train, y):
-    X_tr, y_tr = stack_train[tr_idx], y.iloc[tr_idx]
-    X_va       = stack_train[va_idx]
-    # re-fit a fresh meta on the fold (same config as in 3.8)
-    meta_fold = LogisticRegression(penalty="l2", C=1.0, max_iter=2000, random_state=42)
-    meta_fold.fit(X_tr, y_tr)
-    oof_meta_scores[va_idx] = meta_fold.predict_proba(X_va)[:, 1]
+    Parameters
+    ----------
+    stack_train_oof : np.ndarray
+        OOF meta-features for the stacking (shape: [n_samples, n_meta_features]).
+        This is the `stack_train_oof` returned by `run_feature_selection_and_stacking`.
+    y : array-like (len = n_samples)
+        True labels (0/1) for training data.
+    test_scores : np.ndarray
+        Predicted probabilities P(y=1) on the TEST set from the meta-model
+        (`stack_test_proba` from `run_feature_selection_and_stacking`).
+    battle_ids : array-like
+        Battle IDs for the TEST set (same order as `test_scores`).
+    th_min, th_max, th_step : float
+        Grid for threshold search.
+    n_splits : int
+        Number of CV folds for OOF meta threshold tuning.
+    random_state : int
+        Seed for StratifiedKFold.
+    save_path : str or None
+        If not None, saves the submission CSV to this path.
+    verbose : bool
+        If True, prints diagnostics.
 
-# Search best threshold on OOF scores
-ths = np.arange(0.30, 0.71, 0.005)
-accs = []
-for t in ths:
-    preds = (oof_meta_scores >= t).astype(int)
-    accs.append(accuracy_score(y, preds))
+    Returns
+    -------
+    result : dict
+        {
+          "best_thr": best_thr,
+          "best_acc": best_acc,
+          "thresholds_df": thresholds_df,
+          "submission": submission_df,
+        }
+    """
 
-best_idx = int(np.argmax(accs))
-best_thr = float(ths[best_idx])
-best_acc = float(accs[best_idx])
+    # --- Safety / casting ---
+    stack_train_oof = np.asarray(stack_train_oof)
+    test_scores = np.asarray(test_scores).astype(float)
 
-print(f"Best threshold on OOF = {best_thr:.3f} | OOF Accuracy = {best_acc:.4f}")
-
-# Apply best threshold to TEST scores from the already-fitted meta (from 3.8)
-# If you kept both:
-#  - stack_pred_scores = meta.predict_proba(stack_test)[:,1]
-#  - stack_pred_labels = meta.predict(stack_test)
-if "stack_pred_scores" not in globals():
-    # compute scores if not already present
-    stack_pred_scores = meta.predict_proba(stack_test)[:, 1]
-
-stack_pred_labels_tuned = (stack_pred_scores >= best_thr).astype(int)
-print("✅ Created 'stack_pred_labels_tuned' using tuned threshold.")
-
-# (Optional) quick table preview
-import pandas as pd
-display(pd.DataFrame({
-    "threshold": ths,
-    "oof_accuracy": accs
-}).iloc[max(0, best_idx-5):best_idx+6].reset_index(drop=True))
-
-
-# # 4. Creating the Submission File
-
-# In[17]:
-
-
-# === Cell 4 — Submission (works with stacking + threshold tuning OR plain logistic) ===
-import numpy as np
-import pandas as pd
-
-# Safety: check that we have test_df with battle_id
-if "test_df" not in globals():
-    raise RuntimeError("test_df is missing. Run Cells 1–2 first.")
-if "battle_id" not in test_df.columns:
-    raise RuntimeError("Column 'battle_id' not found in test_df.")
-
-save_path = "/kaggle/working/submission.csv"
-
-used_strategy = None
-
-# 1) Preferred path: Stacking + (optionally) tuned threshold from Cell 3.9
-if all(v in globals() for v in ["meta", "stack_test"]):
-    print("Using STACKING meta-model for submission...")
-
-    # If tuned labels already computed, reuse them
-    if "stack_pred_labels_tuned" in globals():
-        preds = stack_pred_labels_tuned.astype(int)
-        used_strategy = "stacking (tuned threshold)"
+    if isinstance(y, (pd.Series, pd.DataFrame)):
+        y_np = np.asarray(y).ravel()
     else:
-        # If we have tuned threshold 'best_thr' and scores cached, apply it
-        if "stack_pred_scores" in globals():
-            thr = globals().get("best_thr", 0.5)
-            preds = (stack_pred_scores >= float(thr)).astype(int)
-            used_strategy = f"stacking (scores + thr={float(thr):.3f})"
-        else:
-            # Fall back to standard 0.5 on fresh scores
-            scores = meta.predict_proba(stack_test)[:, 1]
-            thr = float(globals().get("best_thr", 0.5))
-            preds = (scores >= thr).astype(int)
-            used_strategy = f"stacking (fresh scores + thr={thr:.3f})"
+        y_np = np.asarray(y).ravel()
 
-# 2) Fallback: Logistic L1 su feature ridotte (Cell 3.3 + 3.2)
-elif all(v in globals() for v in ["best_logreg", "test_reduced"]):
-    print("Using best L1-Logistic on reduced features for submission...")
-    preds = best_logreg.predict(test_reduced).astype(int)
-    used_strategy = "logistic L1 (reduced features)"
+    battle_ids_arr = np.asarray(battle_ids)
 
-# 3) Last resort: simple logistic 'model' trained on all features (Cell 3 base)
-elif all(v in globals() for v in ["model", "train_df"]):
-    print("Using baseline Logistic (no reduction) for submission...")
-    features = [c for c in test_df.columns if c not in ("battle_id", "player_won")]
-    if hasattr(model, "predict"):
-        preds = model.predict(test_df[features]).astype(int)
-        used_strategy = "baseline logistic"
-    else:
-        raise RuntimeError("Baseline 'model' available but has no predict().")
+    if verbose:
+        print("\n" + "=" * 70)
+        print(" 3.9 Threshold tuning on OOF meta-features + submission")
+        print("=" * 70)
+        print(f"stack_train_oof shape : {stack_train_oof.shape}")
+        print(f"y length              : {len(y_np)}")
+        print(f"test_scores length    : {len(test_scores)}")
+        print(f"battle_ids length     : {len(battle_ids_arr)}")
 
-else:
-    raise RuntimeError(
-        "No trained model found for submission. "
-        "Run either the stacking cells (3.5–3.8 & 3.9) or the logistic cells (3–3.3)."
-    )
+    # -------------------------------------------------------------------------
+    # 1) Build OOF probabilities for the meta-learner (no bias)
+    #    Same idea as original 3.9, but encapsulated in a function.
+    # -------------------------------------------------------------------------
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    oof_meta_scores = np.zeros(len(stack_train_oof))
 
-# Build and save submission
-submission = pd.DataFrame({
-    "battle_id": test_df["battle_id"].astype(int),
-    "player_won": preds.astype(int)
-})
+    for tr_idx, va_idx in cv.split(stack_train_oof, y_np):
+        X_tr, y_tr = stack_train_oof[tr_idx], y_np[tr_idx]
+        X_va = stack_train_oof[va_idx]
 
-submission.to_csv(save_path, index=False)
-print(f"✅ Submission saved to {save_path}")
-print(f"Strategy used: {used_strategy}")
-display(submission.head())
+        meta_fold = LogisticRegression(
+            penalty="l2",
+            C=1.0,
+            max_iter=2000,
+            random_state=random_state,
+        )
+        meta_fold.fit(X_tr, y_tr)
+        oof_meta_scores[va_idx] = meta_fold.predict_proba(X_va)[:, 1]
+
+    # -------------------------------------------------------------------------
+    # 2) Grid search on thresholds using OOF scores
+    # -------------------------------------------------------------------------
+    ths = np.arange(th_min, th_max + 1e-9, th_step)
+    accs = []
+
+    for t in ths:
+        preds = (oof_meta_scores >= t).astype(int)
+        acc = accuracy_score(y_np, preds)
+        accs.append(acc)
+
+    accs = np.asarray(accs)
+    best_idx = int(np.argmax(accs))
+    best_thr = float(ths[best_idx])
+    best_acc = float(accs[best_idx])
+
+    if verbose:
+        print(f"\nBest threshold on OOF = {best_thr:.3f} | OOF Accuracy = {best_acc:.4f}")
+
+    thresholds_df = pd.DataFrame({
+        "threshold": ths,
+        "oof_accuracy": accs,
+    })
+
+    # -------------------------------------------------------------------------
+    # 3) Apply best threshold to TEST scores from the already-fitted meta
+    # -------------------------------------------------------------------------
+    preds_test = (test_scores >= best_thr).astype(int)
+
+    if verbose:
+        print("✅ Created tuned test labels using best threshold.")
+
+    # -------------------------------------------------------------------------
+    # 4) Build submission DataFrame (no globals)
+    # -------------------------------------------------------------------------
+    submission = pd.DataFrame({
+        "battle_id": battle_ids_arr.astype(int),
+        "player_won": preds_test.astype(int),
+    })
+
+    if save_path is not None:
+        submission.to_csv(save_path, index=False)
+        if verbose:
+            print(f"\n✅ Submission saved to {save_path}")
+
+    result = {
+        "best_thr": best_thr,
+        "best_acc": best_acc,
+        "thresholds_df": thresholds_df,
+        "submission": submission,
+    }
+    return result
+
 
 
 # ### 5. Submitting Your Results
