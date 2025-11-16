@@ -6,11 +6,25 @@ Each model is provided as a separate Python script.
 
 ## Repository Contents
 
-- **model-1.py**   
-- **model-2.py**   
-- **model-3.py** 
+FDS_COMP_2025/
+│
+├── main.py                          # Main notebook (orchestrates all three models)
+│
+├── model-1.py                       # Model 1: Python module for the first model
+├── model-2.py                       # Model 2: Python module for the second model
+├── model-3.py                       # Model 3: Python module for the third model
+│
+├── data/
+│   ├── train.jsonl                  # Training data
+│   └── test.jsonl                   # Test data
+│
+├── submissions/
+│   ├── submission_model1.csv        # Model 1 predictions
+│   ├── submission_model2.csv        # Model 2 predictions
+│   └── submission_model3.csv        # Model 3 predictions
+│
+└── README.md                        # Project documentation
 
-Each script implements a complete model and produces its own output file.
 
 ## How to use 
 
