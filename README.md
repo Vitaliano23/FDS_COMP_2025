@@ -1,6 +1,6 @@
 # FDS_COMP_2025 — Kaggle Competition (Pokémon Battle Prediction 2025)
 
-This repository includes the project’s main execution script along with three Python modules, each implementing a different predictive model used to generate submissions for the Kaggle competition **“FDS — Pokémon Battles Prediction 2025.”**, developed as part of the Fundamentals of Data Science course at Sapienza University of Rome.
+This repository contains the material developed for the Kaggle competition **“FDS — Pokémon Battles Prediction 2025,”** as part of the Fundamentals of Data Science course at Sapienza University of Rome.
 
 ## Repository Contents
 ```text
