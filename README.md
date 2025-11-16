@@ -14,8 +14,7 @@ FDS_COMP_2025/
 │
 └── README.md                        # Project documentation
 ```
-**Note**: Each *model* file is derived from a single notebook. Since each notebook has its own feature engineering, feature selection and modeling steps, the models do not share common functions.
-For this reason, creating shared reusable modules would not be meaningful.
+**Note**: Each *model* file is derived from a single notebook. Since each notebook has its own feature engineering, feature selection and modeling steps, the models do not share common functions. For this reason, creating shared reusable modules would not be meaningful, so they were not included.
 
 ## How to use 
 To run the project, simply execute the `main.py` file in Kaggle or VS Code.
