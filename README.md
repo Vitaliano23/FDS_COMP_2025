@@ -8,12 +8,14 @@ FDS_COMP_2025/
 │
 ├── main.py                          # Main notebook (orchestrates all three models)
 │
-├── model-1.py                       # Model 1: Python module for the first model
-├── model-2.py                       # Model 2: Python module for the second model
-├── model-3.py                       # Model 3: Python module for the third model
+├── model-1.py                       # Model 1: Python module for “fork-of-vit-notebook-fds2-final.py”
+├── model-2.py                       # Model 2: Python module for “fork-of-vit-notebook-fds.py”
+├── model-3.py                       # Model 3: Python module for “mrk-notebook-fds.py”
 │
 └── README.md                        # Project documentation
 ```
+**Note**: Each *model* file is derived from a single notebook. Since each notebook has its own feature engineering, feature selection and modeling steps, the models do not share common functions.
+For this reason, creating shared reusable modules would not be meaningful.
 
 ## How to use 
 To run the project, simply execute the `main.py` file in Kaggle or VS Code.
