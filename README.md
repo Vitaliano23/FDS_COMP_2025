@@ -5,7 +5,7 @@ This GitHub repository contains three independent models designed to generate su
 Each model is provided as a separate Python script.
 
 ## Repository Contents
-
+```text
 FDS_COMP_2025/
 │
 ├── main.py                          # Main notebook (orchestrates all three models)
@@ -24,7 +24,7 @@ FDS_COMP_2025/
 │   └── submission_model3.csv        # Model 3 predictions
 │
 └── README.md                        # Project documentation
-
+```
 
 ## How to use 
 
