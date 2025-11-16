@@ -14,10 +14,6 @@ FDS_COMP_2025/
 ├── model-2.py                       # Model 2: Python module for the second model
 ├── model-3.py                       # Model 3: Python module for the third model
 │
-├── data/
-│   ├── train.jsonl                  # Training data
-│   └── test.jsonl                   # Test data
-│
 ├── submissions/
 │   ├── submission_model1.csv        # Model 1 predictions
 │   ├── submission_model2.csv        # Model 2 predictions
