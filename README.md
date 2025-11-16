@@ -16,7 +16,7 @@ FDS_COMP_2025/
 ```
 
 ## How to use 
-To run the project, simply execute the `main.py` file in your preferred environment (Kaggle, VS Code, or any Python IDE).  
+To run the project, simply execute the `main.py` file in Kaggle or VS Code.
 The script imports the three model modules and runs them to generate the submission files.
 
 ## Short description of the models
