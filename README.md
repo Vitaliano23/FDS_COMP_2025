@@ -1,8 +1,6 @@
 # FDS_COMP_2025 — Kaggle Competition (Pokémon Battle Prediction 2025)
 
-This GitHub repository contains three independent models designed to generate submissions for the Kaggle competition **“FDS — Pokémon Battles Prediction 2025.”**, developed as part of the Fundamentals of Data Science course at Sapienza University of Rome.
-
-Each model is provided as a separate Python script.
+This repository includes the project’s main execution script along with three Python modules, each implementing a different predictive model used to generate submissions for the Kaggle competition **“FDS — Pokémon Battles Prediction 2025.”**, developed as part of the Fundamentals of Data Science course at Sapienza University of Rome.
 
 ## Repository Contents
 ```text
@@ -13,11 +11,6 @@ FDS_COMP_2025/
 ├── model-1.py                       # Model 1: Python module for the first model
 ├── model-2.py                       # Model 2: Python module for the second model
 ├── model-3.py                       # Model 3: Python module for the third model
-│
-├── submissions/
-│   ├── submission_model1.csv        # Model 1 predictions
-│   ├── submission_model2.csv        # Model 2 predictions
-│   └── submission_model3.csv        # Model 3 predictions
 │
 └── README.md                        # Project documentation
 ```
