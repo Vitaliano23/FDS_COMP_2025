@@ -6,7 +6,7 @@ This repository contains the material developed for the Kaggle competition **“
 ```text
 FDS_COMP_2025/
 │
-├── main.py                          # Main notebook (orchestrates all three models)
+├── main.ipynb                          # Main notebook (orchestrates all three models)
 │
 ├── model-1.py                       # Model 1: Python module for “fork-of-vit-notebook-fds2-final.py”
 ├── model-2.py                       # Model 2: Python module for “fork-of-vit-notebook-fds.py”
