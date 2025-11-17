@@ -17,8 +17,8 @@ FDS_COMP_2025/
 **Note**: Each *model* file is derived from the corresponding notebook listed above. Since each notebook has its own feature engineering, feature selection and modeling steps, the models do not share common functions. For this reason, creating shared reusable modules would not be meaningful, so they were not included.
 
 ## How to use 
-The `main.ipynb` is the copy of the public notebook *"Final NB - FDS challenge: Siri | Barberio | Impera"*, inside the code section of the *"FDS: Pokemon Battles prediction 2025"* kaggle competition.
-To run the project, simply execute the `main.ipynb` file in **Kaggle**, inside the competition *"FDS: Pokemon Battles prediction 2025"*.
+The `main.ipynb` is a copy of the public notebook *"Final NB - FDS challenge: Siri | Barberio | Impera"*, available in the code section of the *"FDS: Pokemon Battles prediction 2025"* kaggle competition.
+To run the project, simply execute the `main.ipynb` file in **Kaggle**, within the *"FDS: Pokemon Battles prediction 2025"* competition enviroment.
 The script imports the three model modules and runs them to generate the submission files.
 
 ## Short description of the models
